@@ -32,6 +32,7 @@ set -g @coding-agents-tmux-menu-key 'O'
 set -g @coding-agents-tmux-popup-key 'P'
 set -g @coding-agents-tmux-waiting-menu-key 'W'
 set -g @coding-agents-tmux-waiting-popup-key 'C-w'
+set -g @coding-agents-tmux-cycle-key 'C-n'
 set -g @coding-agents-tmux-status 'on'
 set -g @coding-agents-tmux-status-style 'tmux'
 set -g @coding-agents-tmux-status-position 'right'
@@ -45,12 +46,13 @@ To match your tmux theme, you can also override the status colors:
 ```tmux
 set -g @coding-agents-tmux-status-color-neutral 'default'
 set -g @coding-agents-tmux-status-color-idle 'colour244'
+set -g @coding-agents-tmux-status-color-unseen 'colour39'
 set -g @coding-agents-tmux-status-color-busy 'colour81'
 set -g @coding-agents-tmux-status-color-waiting 'colour214'
 set -g @coding-agents-tmux-status-color-unknown 'colour240'
 ```
 
-Using `default` is a good way to let the segment inherit your existing tmux theme colors.
+Using `default` is a good way to let the segment inherit your existing tmux theme colors. The `unseen` color marks idle panes that have finished but that you have not looked at yet; such panes also use a distinct filled-circle glyph (versus the hollow idle circle) so they stand out even in the uncolored menu and popup. Once you focus the pane it reverts to the `idle` color and glyph.
 
 Then install or reload TPM:
 
@@ -157,6 +159,7 @@ Default key bindings:
 - `prefix + P` opens the main popup chooser
 - `prefix + W` jumps to the only waiting session, or opens a waiting-only menu if there are multiple
 - `prefix + C-w` opens the waiting-only popup chooser
+- `prefix + C-n` jumps to the next agent pane needing attention (waiting, then recently-finished idle, then new, then running), oldest first, skipping panes you have already looked at
 
 Launcher behavior:
 
@@ -178,6 +181,7 @@ set -g @coding-agents-tmux-menu-key 'O'
 set -g @coding-agents-tmux-popup-key 'P'
 set -g @coding-agents-tmux-waiting-menu-key 'W'
 set -g @coding-agents-tmux-waiting-popup-key 'C-w'
+set -g @coding-agents-tmux-cycle-key 'C-n'
 ```
 
 Set any of them to `off` to disable that binding.
@@ -211,9 +215,12 @@ Background pane symbols are shown in a stable target order:
 
 - <img src="docs/assets/icons/status-waiting.png" width="14" alt="waiting icon"> waiting
 - <img src="docs/assets/icons/status-busy.png" width="14" alt="busy icon"> busy
-- <img src="docs/assets/icons/status-idle.png" width="14" alt="idle icon"> idle
+- <img src="docs/assets/icons/status-idle.png" width="14" alt="idle icon"> idle (hollow circle; shown once you have focused the pane)
+- unseen idle (filled circle, blue): finished but not yet looked at — changes to the hollow idle circle after you focus it
 - <img src="docs/assets/icons/status-new.png" width="14" alt="new icon"> new
 - <img src="docs/assets/icons/status-unknown.png" width="14" alt="unknown icon"> unknown
+
+The unseen-idle marker is a distinct glyph as well as a distinct color, so it is still distinguishable in the uncolored menu and popup choosers.
 
 By default the status line adds spaces between background pane symbols for readability. If there are more than eight background panes, it automatically switches to a compact no-space form.
 
@@ -299,6 +306,7 @@ Available tmux options:
 - `@coding-agents-tmux-popup-key` main popup chooser key, default `P`
 - `@coding-agents-tmux-waiting-menu-key` waiting-only menu chooser key, default `W`
 - `@coding-agents-tmux-waiting-popup-key` waiting-only popup chooser key, default `C-w`
+- `@coding-agents-tmux-cycle-key` next-attention cycle key, default `C-n`
 - `@coding-agents-tmux-install-opencode-plugin` `on` or `off`, default `on`
 - `@coding-agents-tmux-install-pi-extension` `on` or `off`, default `on`
 - `@coding-agents-tmux-install-codex-hooks` `on` or `off`, default `on`
@@ -318,6 +326,7 @@ Available tmux options:
 - `@coding-agents-tmux-status-prefix` label shown before the status summary, default Nerd Font robot glyph
 - `@coding-agents-tmux-status-color-neutral` tmux color for the prefix and separators, default `colour252`
 - `@coding-agents-tmux-status-color-idle` tmux color for idle state, default `colour70`
+- `@coding-agents-tmux-status-color-unseen` tmux color for idle panes that finished but have not been looked at, default `colour39`
 - `@coding-agents-tmux-status-color-busy` tmux color for busy state, default `colour220`
 - `@coding-agents-tmux-status-color-waiting` tmux color for waiting state, default `colour196`
 - `@coding-agents-tmux-status-color-unknown` tmux color for unknown/none state, default `colour244`
