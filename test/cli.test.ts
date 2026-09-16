@@ -1002,7 +1002,7 @@ exit 0
   }
 });
 
-test("CLI cycle reports when every agent pane has been seen", async () => {
+test("CLI cycle reports when there is no other agent pane to cycle to", async () => {
   const fakeTmux = installFakeTmux(`
 if [ "$1" = "list-panes" ]; then
   printf 'work\t1\t0\t%%1\tOpenCode\topencode\t/tmp/project-a\t1\t/dev/ttys001\n'
@@ -1037,7 +1037,7 @@ exit 0
 
     assert.equal(result.exitCode, 0);
     const log = readFileSync(fakeTmux.logPath, "utf8");
-    assert.match(log, /all agent panes seen/);
+    assert.match(log, /no other agent pane to cycle to/);
     assert.doesNotMatch(log, /select-pane/);
   } finally {
     restoreEnv();

@@ -504,7 +504,7 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
   const next = pickNextCyclePane(ranked, currentTarget);
 
   if (!next) {
-    await displayTmuxMessage("coding-agents-tmux: all agent panes seen");
+    await displayTmuxMessage("coding-agents-tmux: no other agent pane to cycle to");
     return;
   }
 
@@ -1022,7 +1022,7 @@ async function main(): Promise<void> {
   program
     .command("cycle")
     .description(
-      "Jump to the next agent pane needing attention (waiting > idle > new > running), oldest first, skipping panes already seen",
+      "Jump to the next agent pane needing attention (waiting > idle > new > running), oldest first, unseen panes before ones you have already looked at",
     )
     .option("--agent <agent>", "Limit panes to all, opencode, codex, pi, claude, or kiro", "all")
     .option(
