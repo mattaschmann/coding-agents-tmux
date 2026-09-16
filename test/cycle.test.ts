@@ -89,22 +89,71 @@ test("rankPanesForCycle sorts oldest statusSince first within a tier (true FIFO)
   );
 });
 
-test("rankPanesForCycle drops panes marked seen", () => {
+test("rankPanesForCycle ranks unseen panes before seen panes, regardless of tier", () => {
   const panes = [
-    createSummary("work:1.0", "%seen", "waiting-input"),
-    createSummary("work:1.1", "%unseen", "idle"),
+    createSummary("work:1.0", "%seenWaiting", "waiting-input"),
+    createSummary("work:1.1", "%unseenRunning", "running"),
   ];
   const ledger = ledgerOf({
-    "%seen": { observedStatus: "waiting-input", seen: true },
-    "%unseen": { observedStatus: "idle", seen: false },
+    "%seenWaiting": { observedStatus: "waiting-input", seen: true },
+    "%unseenRunning": { observedStatus: "running", seen: false },
   });
 
   const ranked = rankPanesForCycle(panes, ledger);
 
   assert.deepEqual(
     ranked.map((entry) => entry.pane.paneId),
-    ["%unseen"],
+    ["%unseenRunning", "%seenWaiting"],
   );
+});
+
+test("rankPanesForCycle keeps tier order within the seen and unseen groups", () => {
+  const panes = [
+    createSummary("work:1.0", "%seenIdle", "idle"),
+    createSummary("work:1.1", "%seenWaiting", "waiting-input"),
+    createSummary("work:1.2", "%unseenRunning", "running"),
+    createSummary("work:1.3", "%unseenWaiting", "waiting-question"),
+  ];
+  const ledger = ledgerOf({
+    "%seenIdle": { observedStatus: "idle", seen: true },
+    "%seenWaiting": { observedStatus: "waiting-input", seen: true },
+    "%unseenRunning": { observedStatus: "running", seen: false },
+    "%unseenWaiting": { observedStatus: "waiting-question", seen: false },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+
+  assert.deepEqual(
+    ranked.map((entry) => entry.pane.paneId),
+    ["%unseenWaiting", "%unseenRunning", "%seenWaiting", "%seenIdle"],
+  );
+});
+
+test("rankPanesForCycle plus pickNextCyclePane visits every pane once before repeating", () => {
+  const panes = [
+    createSummary("work:1.0", "%1", "waiting-input"),
+    createSummary("work:1.1", "%2", "idle"),
+    createSummary("work:1.2", "%3", "running"),
+  ];
+  const ledger = ledgerOf({
+    "%1": { observedStatus: "waiting-input", seen: true },
+    "%2": { observedStatus: "idle", seen: true },
+    "%3": { observedStatus: "running", seen: true },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+  const order = ranked.map((entry) => entry.pane.target as PaneTarget);
+  const visited: string[] = [];
+  let current = order[0] ?? null;
+
+  for (let step = 0; step < order.length; step += 1) {
+    const next = pickNextCyclePane(ranked, current);
+    assert.ok(next);
+    visited.push(next.pane.paneId);
+    current = next.pane.target as PaneTarget;
+  }
+
+  assert.deepEqual(new Set(visited).size, ranked.length);
 });
 
 test("pickNextCyclePane advances past the current pane and wraps around", () => {

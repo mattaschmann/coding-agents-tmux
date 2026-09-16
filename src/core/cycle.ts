@@ -1,12 +1,15 @@
 // Priority ranking for the `cycle` command. Pure (no tmux/fs) so it is unit
 // testable in isolation.
 //
-// Tiers (highest attention first), oldest `statusSince` first within a tier
+// Ordering is seen-major: unseen panes come first, then already-seen panes, so
+// repeated presses reach every agent pane and wrap rather than stopping once the
+// unacknowledged ones are visited. Within each of those two groups, panes are
+// ordered by attention tier (highest first), then oldest `statusSince` first
 // (true FIFO — a long-waiting pane is never starved by newer arrivals):
 //   0 waiting-question / waiting-input · 1 idle · 2 new · 3 running · 4 unknown
 //
-// Acknowledged ("seen") panes are dropped from the queue; they re-enter only
-// when their status changes (which resets `seen` in the ledger).
+// "seen" means the pane was the active pane at some point since it entered its
+// current status; it resets when the status changes (see cycle-ledger).
 
 import type { CycleLedger } from "./cycle-ledger.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus } from "../types.ts";
@@ -27,14 +30,21 @@ function getCycleTier(status: RuntimeStatus): number {
   }
 }
 
-/** Rank panes into the cycle queue: highest-attention tier first, oldest first within a tier. */
+/**
+ * Rank panes into the cycle queue. Unseen panes first, then seen panes; within
+ * each group, highest-attention tier first, then oldest `statusSince` first.
+ */
 export function rankPanesForCycle(
   summaries: PaneRuntimeSummary[],
   ledger: CycleLedger,
 ): PaneRuntimeSummary[] {
-  const unseen = summaries.filter((entry) => !ledger.get(entry.pane.paneId)?.seen);
+  return [...summaries].sort((left, right) => {
+    const leftSeen = ledger.get(left.pane.paneId)?.seen ? 1 : 0;
+    const rightSeen = ledger.get(right.pane.paneId)?.seen ? 1 : 0;
+    if (leftSeen !== rightSeen) {
+      return leftSeen - rightSeen;
+    }
 
-  return unseen.sort((left, right) => {
     const leftTier = getCycleTier(left.runtime.status);
     const rightTier = getCycleTier(right.runtime.status);
     if (leftTier !== rightTier) {
