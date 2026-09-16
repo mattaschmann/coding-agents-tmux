@@ -26,13 +26,17 @@ import {
   installCodexIntegration,
   persistCodexHookState,
 } from "./core/codex.ts";
+import { observePane, readCycleLedger } from "./core/cycle-ledger.ts";
+import { pickNextCyclePane, rankPanesForCycle } from "./core/cycle.ts";
 import { notifyIntegration } from "./core/notifications.ts";
 import { buildInspectDebugInfo, buildServerMapTemplate } from "./core/opencode.ts";
 import { attachRuntimeToPanes, getRuntimeProviderHelpText } from "./core/runtime.ts";
 import {
   discoverAgentPanes,
+  displayTmuxMessage,
   findDiscoveredPaneByTarget,
   getCurrentTmuxTarget,
+  getCurrentTmuxTargetOrNull,
   resolveTmuxClient,
   switchToPane,
 } from "./core/tmux.ts";
@@ -94,6 +98,7 @@ interface TmuxConfigOptions extends RuntimeProviderOptions {
   popupKey?: string;
   waitingMenuKey?: string;
   waitingPopupKey?: string;
+  cycleKey?: string;
   popupFilter?: "all" | "busy" | "waiting" | "running" | "active";
 }
 
@@ -181,6 +186,15 @@ async function loadPaneRuntimeSummaries(options: RuntimeProviderOptions = {}) {
   return attachRuntimeToPanes(panes, options);
 }
 
+function getUnseenIdlePaneIds(panes: PaneRuntimeSummary[]): Set<string> {
+  const ledger = readCycleLedger();
+  return new Set(
+    panes
+      .filter((entry) => entry.runtime.status === "idle" && !ledger.get(entry.pane.paneId)?.seen)
+      .map((entry) => entry.pane.paneId),
+  );
+}
+
 export function parseWatchInterval(value: string | undefined): number {
   if (!value) {
     return 2;
@@ -245,7 +259,7 @@ async function runTmuxCommand(args: string[]): Promise<void> {
 
 function renderListOutput(panes: PaneRuntimeSummary[], options: ListOptions): string {
   if (options.compact) {
-    return renderCompactPaneList(panes);
+    return renderCompactPaneList(panes, getUnseenIdlePaneIds(panes));
   }
 
   if (options.json) {
@@ -472,9 +486,41 @@ async function runSwitchFilteredCommand(
   await switchToPane(pane.pane, client);
 }
 
+async function runCycleCommand(options: SwitchOptions): Promise<void> {
+  const now = Date.now();
+  const panes = filterPaneSummaries(await loadPaneRuntimeSummaries(options), options);
+  const currentTarget = process.env.TMUX ? await getCurrentTmuxTargetOrNull() : null;
+
+  for (const entry of panes) {
+    observePane(
+      entry.pane.paneId,
+      entry.runtime.status,
+      currentTarget !== null && entry.pane.target === currentTarget,
+      now,
+    );
+  }
+
+  const ranked = rankPanesForCycle(panes, readCycleLedger());
+  const next = pickNextCyclePane(ranked, currentTarget);
+
+  if (!next) {
+    await displayTmuxMessage("coding-agents-tmux: all agent panes seen");
+    return;
+  }
+
+  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
+  await switchToPane(next.pane, client);
+  observePane(next.pane.paneId, next.runtime.status, true, now);
+}
+
 async function runPopupUiCommand(options: PopupUiOptions): Promise<void> {
+  let lastPanes: PaneRuntimeSummary[] = [];
   const pane = await promptForPopupSelection({
-    loadPanes: async () => filterPaneSummaries(await loadPaneRuntimeSummaries(options), options),
+    loadPanes: async () => {
+      lastPanes = filterPaneSummaries(await loadPaneRuntimeSummaries(options), options);
+      return lastPanes;
+    },
+    loadUnseenIdlePaneIds: () => getUnseenIdlePaneIds(lastPanes),
   });
 
   if (!pane) {
@@ -640,6 +686,7 @@ async function runInstallClaudeCommand(_options: InstallClaudeOptions): Promise<
 interface StatusOutputContext {
   currentTarget?: PaneTarget;
   tmuxAvailable: boolean;
+  unseenIdlePaneIds?: ReadonlySet<string>;
 }
 
 function shouldFallbackStatusToSummary(error: unknown): boolean {
@@ -651,7 +698,11 @@ export function buildStatusOutput(
   options: StatusOptions,
   context: StatusOutputContext,
 ): string {
-  const renderOptions = options.style ? { style: options.style } : {};
+  const unseenIdlePaneIds = context.unseenIdlePaneIds;
+  const renderOptions = {
+    ...(options.style ? { style: options.style } : {}),
+    ...(unseenIdlePaneIds ? { unseenIdlePaneIds } : {}),
+  };
 
   if (options.summary || !context.tmuxAvailable) {
     if (options.tone) {
@@ -701,9 +752,11 @@ export function buildStatusOutput(
   const scopedPanes = current
     ? [current, ...panes.filter((entry) => getPaneWindowKey(entry) !== currentWindowKey)]
     : panes;
-  const currentRenderOptions = options.style
-    ? { style: options.style, includeCurrentPlaceholder: true }
-    : { includeCurrentPlaceholder: true };
+  const currentRenderOptions = {
+    includeCurrentPlaceholder: true,
+    ...(options.style ? { style: options.style } : {}),
+    ...(unseenIdlePaneIds ? { unseenIdlePaneIds } : {}),
+  };
 
   if (options.tone) {
     return renderStatusTone(current, scopedPanes);
@@ -740,11 +793,25 @@ async function runStatusCommand(options: StatusOptions): Promise<void> {
     }
   }
 
+  const observedAt = Date.now();
+  for (const entry of panes) {
+    observePane(
+      entry.pane.paneId,
+      entry.runtime.status,
+      currentTarget !== undefined && entry.pane.target === currentTarget,
+      observedAt,
+    );
+  }
+
+  const unseenIdlePaneIds = getUnseenIdlePaneIds(panes);
+
   console.log(
     buildStatusOutput(
       panes,
       options,
-      currentTarget ? { currentTarget, tmuxAvailable } : { tmuxAvailable: false },
+      currentTarget
+        ? { currentTarget, tmuxAvailable, unseenIdlePaneIds }
+        : { tmuxAvailable: false, unseenIdlePaneIds },
     ),
   );
 }
@@ -784,23 +851,27 @@ export function buildTmuxSnippet(options: TmuxConfigOptions): string {
   const switchArgs: string[] = [];
   const waitingArgs: string[] = ["--waiting"];
   const statusArgs = ["status", "--style", "tmux"];
+  const cycleArgs = ["cycle"];
 
   if (options.provider) {
     switchArgs.push("--provider", options.provider);
     waitingArgs.push("--provider", options.provider);
     statusArgs.push("--provider", options.provider);
+    cycleArgs.push("--provider", options.provider);
   }
 
   if (options.agent) {
     switchArgs.push("--agent", options.agent);
     waitingArgs.push("--agent", options.agent);
     statusArgs.push("--agent", options.agent);
+    cycleArgs.push("--agent", options.agent);
   }
 
   if (options.serverMap) {
     switchArgs.push("--server-map", options.serverMap);
     waitingArgs.push("--server-map", options.serverMap);
     statusArgs.push("--server-map", options.serverMap);
+    cycleArgs.push("--server-map", options.serverMap);
   }
 
   switchArgs.push(...getPopupFilterArgs(options.popupFilter));
@@ -810,6 +881,7 @@ export function buildTmuxSnippet(options: TmuxConfigOptions): string {
   const menuCommand = buildMenuScriptCommand(switchArgs);
   const waitingMenuCommand = buildMenuScriptCommand(waitingArgs);
   const statusCommand = buildShellRunCommand(statusArgs);
+  const cycleCommand = buildShellRunCommand(cycleArgs);
   const notificationScript = join(REPO_ROOT, "scripts", "notify-status-change.sh");
   const statusRefreshHookCommand = buildStatusRefreshHookCommand(notificationScript);
   const statusRefreshHookLines = STATUS_REFRESH_HOOKS.map(
@@ -820,6 +892,7 @@ export function buildTmuxSnippet(options: TmuxConfigOptions): string {
   const popupKey = options.popupKey ?? "P";
   const waitingMenuKey = options.waitingMenuKey ?? "W";
   const waitingPopupKey = options.waitingPopupKey ?? "C-w";
+  const cycleKey = options.cycleKey ?? "C-n";
 
   return [
     "# >>> coding-agents-tmux >>>",
@@ -827,6 +900,7 @@ export function buildTmuxSnippet(options: TmuxConfigOptions): string {
     `bind-key ${popupKey} display-popup -E -w 100% -h 100% -T ${tmuxDoubleQuote("Coding Agent Sessions")} ${tmuxDoubleQuote(popupCommand)}`,
     `bind-key ${waitingMenuKey} run-shell ${tmuxDoubleQuote(waitingMenuCommand)}`,
     `bind-key ${waitingPopupKey} display-popup -E -w 100% -h 100% -T ${tmuxDoubleQuote("Coding Agent Sessions (Waiting)")} ${tmuxDoubleQuote(waitingPopupCommand)}`,
+    `bind-key ${cycleKey} run-shell ${tmuxDoubleQuote(cycleCommand)}`,
     "set -g status-interval 0",
     ...statusRefreshHookLines,
     `set -g status-right ${tmuxDoubleQuote(`#(${statusCommand})`)}`,
@@ -944,6 +1018,31 @@ async function main(): Promise<void> {
     .option("--running", "Only allow panes with runtime status 'running' as candidates")
     .option("--client <client>", "Target an attached tmux client by name, or use auto")
     .action(runSwitchFilteredCommand);
+
+  program
+    .command("cycle")
+    .description(
+      "Jump to the next agent pane needing attention (waiting > idle > new > running), oldest first, skipping panes already seen",
+    )
+    .option("--agent <agent>", "Limit panes to all, opencode, codex, pi, claude, or kiro", "all")
+    .option(
+      "--provider <provider>",
+      "Runtime provider: auto, plugin, sqlite, or server",
+      DEFAULT_RUNTIME_PROVIDER,
+    )
+    .option(
+      "--server-map <value>",
+      "JSON object or file path mapping pane targets to server endpoints",
+    )
+    .option("--active", "Only allow active tmux panes as candidates")
+    .option("--waiting", "Only allow panes waiting for question or freeform input as candidates")
+    .option(
+      "--busy",
+      "Only allow panes that are running or waiting for user response as candidates",
+    )
+    .option("--running", "Only allow panes with runtime status 'running' as candidates")
+    .option("--client <client>", "Target an attached tmux client by name, or use auto")
+    .action(runCycleCommand);
 
   program
     .command("server-map-template")
@@ -1091,6 +1190,11 @@ async function main(): Promise<void> {
       "C-w",
     )
     .option(
+      "--cycle-key <key>",
+      "Tmux key binding to cycle to the next agent pane needing attention",
+      "C-n",
+    )
+    .option(
       "--popup-filter <filter>",
       "Popup default filter: all, busy, waiting, running, or active",
       "all",
@@ -1117,6 +1221,11 @@ async function main(): Promise<void> {
       "--waiting-popup-key <key>",
       "Tmux key binding for the waiting-only popup chooser",
       "C-w",
+    )
+    .option(
+      "--cycle-key <key>",
+      "Tmux key binding to cycle to the next agent pane needing attention",
+      "C-n",
     )
     .option(
       "--popup-filter <filter>",
