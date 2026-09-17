@@ -89,7 +89,7 @@ test("rankPanesForCycle sorts oldest statusSince first within a tier (true FIFO)
   );
 });
 
-test("rankPanesForCycle ranks unseen panes before seen panes, regardless of tier", () => {
+test("rankPanesForCycle keeps a seen waiting pane ahead of an unseen lower tier", () => {
   const panes = [
     createSummary("work:1.0", "%seenWaiting", "waiting-input"),
     createSummary("work:1.1", "%unseenRunning", "running"),
@@ -103,11 +103,29 @@ test("rankPanesForCycle ranks unseen panes before seen panes, regardless of tier
 
   assert.deepEqual(
     ranked.map((entry) => entry.pane.paneId),
-    ["%unseenRunning", "%seenWaiting"],
+    ["%seenWaiting", "%unseenRunning"],
   );
 });
 
-test("rankPanesForCycle keeps tier order within the seen and unseen groups", () => {
+test("rankPanesForCycle keeps a seen waiting pane ahead of an unseen idle pane", () => {
+  const panes = [
+    createSummary("work:1.0", "%unseenIdle", "idle"),
+    createSummary("work:1.1", "%seenWaiting", "waiting-question"),
+  ];
+  const ledger = ledgerOf({
+    "%unseenIdle": { observedStatus: "idle", seen: false },
+    "%seenWaiting": { observedStatus: "waiting-question", seen: true },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+
+  assert.deepEqual(
+    ranked.map((entry) => entry.pane.paneId),
+    ["%seenWaiting", "%unseenIdle"],
+  );
+});
+
+test("rankPanesForCycle keeps seen-major order among non-waiting tiers", () => {
   const panes = [
     createSummary("work:1.0", "%seenIdle", "idle"),
     createSummary("work:1.1", "%seenWaiting", "waiting-input"),
@@ -125,7 +143,7 @@ test("rankPanesForCycle keeps tier order within the seen and unseen groups", () 
 
   assert.deepEqual(
     ranked.map((entry) => entry.pane.paneId),
-    ["%unseenWaiting", "%unseenRunning", "%seenWaiting", "%seenIdle"],
+    ["%seenWaiting", "%unseenWaiting", "%unseenRunning", "%seenIdle"],
   );
 });
 
