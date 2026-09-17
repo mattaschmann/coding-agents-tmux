@@ -1022,7 +1022,7 @@ async function main(): Promise<void> {
   program
     .command("cycle")
     .description(
-      "Jump to the next agent pane needing attention (waiting > idle > new > running), oldest first, unseen panes before ones you have already looked at",
+      "Jump to the next agent pane needing attention (waiting > idle > new > running), oldest first, unseen panes before seen ones within a tier (waiting panes always stay ahead of lower tiers)",
     )
     .option("--agent <agent>", "Limit panes to all, opencode, codex, pi, claude, or kiro", "all")
     .option(

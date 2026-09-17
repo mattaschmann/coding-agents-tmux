@@ -214,9 +214,12 @@ state — so ordinary tmux navigation acknowledges panes too, not just cycling. 
 pane becomes **unseen** again when its state changes (for example, a running
 session goes idle, or an idle session starts waiting on a prompt).
 
-Unseen panes are always offered before seen ones. Repeated presses therefore
-sweep everything you have not looked at yet — highest priority first — and then
-continue through the panes you have already seen, wrapping around indefinitely.
+Unseen panes are offered before seen ones **within the same tier**, so among
+equally urgent panes the ones you have not looked at come first. Waiting panes
+are the exception: a glance does not answer a prompt, so a pane still waiting on
+you is never demoted for having been seen — it stays ahead of lower tiers
+regardless. Repeated presses therefore sweep the panes that need you, highest
+priority first, then continue through the rest, wrapping around indefinitely.
 Cycling never dead-ends: as long as there is more than one agent pane, `C-n`
 always moves.
 
@@ -233,10 +236,15 @@ running — none looked at yet.
 - Press `C-n` → jumps to **A** (waiting outranks everything).
 - Press `C-n` → jumps to **B** (idle outranks running).
 - Press `C-n` → jumps to **C** (running is last).
-- Press `C-n` → wraps back to **A**, now as a seen pane, and continues the loop.
+- Press `C-n` → wraps back to **A**: still waiting, so still first in line.
 
-If **C** later goes idle, it becomes unseen again and jumps ahead of the panes
-you have already reviewed on the next press.
+Once you answer **A**'s prompt it leaves the waiting tier and, now seen, sinks
+behind anything you have not reviewed. But while it is still waiting, glancing at
+it does not push it down — a pane blocked on you stays ahead of an unseen idle or
+running pane, not behind it.
+
+If **C** later goes idle, it becomes unseen again and jumps ahead of the seen
+panes in its own tier and below on the next press.
 
 The cycle key is configurable like the other bindings, and can be disabled with
 `off`:
