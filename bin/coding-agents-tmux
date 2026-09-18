@@ -15,4 +15,16 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# Fast path for tmux status redraws: `status-cached <variant>` reads a cached
+# render via a dependency-light entry (~30ms) instead of loading the full CLI
+# graph (~130ms, over tmux's 100ms #() budget). Exits non-zero on a cache miss
+# so the caller can fall back to a full `status` render.
+if [ "${1:-}" = "status-cached" ]; then
+  CACHE_CLI="$CURRENT_DIR/src/status-cache.ts"
+  if [ -f "$CACHE_CLI" ]; then
+    exec node --disable-warning=ExperimentalWarning "$CACHE_CLI" "${2:-}"
+  fi
+  exit 1
+fi
+
 exec node --disable-warning=ExperimentalWarning "$CLI" "$@"

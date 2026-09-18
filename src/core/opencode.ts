@@ -10,6 +10,11 @@ import {
 } from "./codex.ts";
 import { capturePanePreview } from "./tmux.ts";
 import { getEnvValue, getPreferredStateDir, getStateDirCandidates } from "../naming.ts";
+import {
+  getBooleanCandidate,
+  getNestedValue,
+  getStringCandidate,
+} from "./opencode-plugin-state.ts";
 import type {
   CodexRuntimeDebug,
   DiscoveredPane,
@@ -773,55 +778,9 @@ function parseServerMap(value: string | undefined): Record<string, string> {
   return result;
 }
 
-// NOTE: duplicated verbatim in plugin/coding-agents-tmux.ts — the plugin ships
-// as a standalone symlink and cannot import from src/. Keep both copies in sync.
-function getNestedValue(payload: unknown, path: string[]): unknown {
-  let current: unknown = payload;
-
-  for (const key of path) {
-    if (!current || typeof current !== "object") {
-      return undefined;
-    }
-
-    if (Array.isArray(current)) {
-      const index = Number(key);
-      if (!Number.isInteger(index) || index < 0 || index >= current.length) {
-        return undefined;
-      }
-      current = current[index];
-      continue;
-    }
-
-    if (!(key in current)) {
-      return undefined;
-    }
-
-    current = (current as Record<string, unknown>)[key];
-  }
-
-  return current;
-}
-
-function getStringCandidate(payload: unknown, paths: string[][]): string | null {
-  for (const path of paths) {
-    const value = getNestedValue(payload, path);
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
-
-function getBooleanCandidate(payload: unknown, paths: string[][]): boolean | null {
-  for (const path of paths) {
-    const value = getNestedValue(payload, path);
-    if (typeof value === "boolean") {
-      return value;
-    }
-  }
-  return null;
-}
-
+// Low-level value probes live in the shared plugin-state module (also consumed
+// by both plugin entrypoints). Imported here to avoid duplicating them. The
+// reader keeps its own narrow option-count probe to preserve prior behavior.
 function getOptionCountCandidate(payload: unknown): number | null {
   const candidates = [
     ["question", "options"],

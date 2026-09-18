@@ -341,22 +341,68 @@ install_cli_dependencies() {
 }
 
 install_opencode_plugin() {
-  local plugin_source="$CURRENT_DIR/plugin/coding-agents-tmux.ts"
-  local config_root plugin_dir plugin_target legacy_plugin_target
+  local loose_source="$CURRENT_DIR/plugin/coding-agents-tmux.ts"
+  local package_source="$CURRENT_DIR/plugin/coding-agents-tmux"
+  local config_root plugin_dir loose_target package_target opencode_major
 
-  if [ ! -f "$plugin_source" ]; then
+  if [ ! -f "$loose_source" ]; then
     tmux display-message "coding-agents-tmux: missing plugin/coding-agents-tmux.ts in plugin directory"
     return
   fi
 
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
   plugin_dir="$config_root/opencode/plugins"
-  plugin_target="$plugin_dir/coding-agents-tmux.ts"
+  # V1 discovers loose `.ts` files; V2 requires a directory package with a `tui`
+  # entrypoint. One file cannot satisfy both loaders, so install the entrypoint
+  # matching the installed OpenCode major and remove the other (migration).
+  loose_target="$plugin_dir/coding-agents-tmux.ts"
+  package_target="$plugin_dir/coding-agents-tmux"
 
   mkdir -p "$plugin_dir"
-  ln -sfn "$plugin_source" "$plugin_target"
-  tmux set-option -gq '@coding-agents-tmux-plugin-path' "$plugin_target"
+
+  opencode_major="$(detect_opencode_major)"
+
+  if [ "$opencode_major" -ge 2 ] 2>/dev/null && [ -d "$package_source" ]; then
+    # V2: install the directory package, remove any stale loose V1 symlink.
+    if [ -L "$loose_target" ] || [ -f "$loose_target" ]; then
+      rm -f "$loose_target"
+    fi
+    ln -sfn "$package_source" "$package_target"
+    tmux set-option -gq '@coding-agents-tmux-plugin-path' "$package_target"
+  else
+    # V1 (or undetectable): install the loose file, remove any stale V2 package
+    # symlink so V2's discovery does not double-load a broken loose entry.
+    if [ -L "$package_target" ] || [ -d "$package_target" ]; then
+      rm -f "$package_target"
+    fi
+    ln -sfn "$loose_source" "$loose_target"
+    tmux set-option -gq '@coding-agents-tmux-plugin-path' "$loose_target"
+  fi
 }
+
+# Best-effort OpenCode major-version detection. Prints the major integer, or 0
+# when opencode is absent or unparseable (callers treat 0/1 as "install V1").
+detect_opencode_major() {
+  local version_output major
+
+  if ! command -v opencode >/dev/null 2>&1; then
+    echo 0
+    return
+  fi
+
+  version_output="$(opencode --version 2>/dev/null | head -n 1)"
+  # Extract the first dotted-version token (e.g. "v2.0.8" or "1.18.31") and take
+  # its leading major component.
+  major="$(printf '%s\n' "$version_output" |
+    grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | cut -d. -f1)"
+
+  if [ -n "$major" ]; then
+    echo "$major"
+  else
+    echo 0
+  fi
+}
+
 
 install_codex_hooks() {
   if ! "$CURRENT_DIR/bin/coding-agents-tmux" install-codex >/dev/null 2>&1; then
@@ -530,9 +576,14 @@ main() {
     exit 0
   fi
 
+  local cli="$CURRENT_DIR/bin/coding-agents-tmux"
+  local status_env="CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown'"
   switch_command="'$popup_script' --provider '$provider'"
   waiting_switch_command="'$popup_script' --provider '$provider' --waiting"
-  status_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown' '$CURRENT_DIR/bin/coding-agents-tmux' status --style '$status_style' --provider '$provider'"
+  # The status render tries the fast cache reader first (~30ms, under tmux's
+  # ~100ms #() budget); on a cache miss it falls back to a full render that
+  # repopulates the cache. 'main' keys this render variant.
+  status_command="{ '$cli' status-cached 'main' || { cd '$CURRENT_DIR' && $status_env '$cli' status --style '$status_style' --provider '$provider' --cache-variant 'main'; }; }"
   status_text_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_SHOW_PREFIX='off' '$CURRENT_DIR/bin/coding-agents-tmux' status --style 'plain' --provider '$provider'"
   status_inline_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_SHOW_PREFIX='off' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown' '$CURRENT_DIR/bin/coding-agents-tmux' status --style 'tmux' --provider '$provider'"
   status_tone_command="cd '$CURRENT_DIR' && '$CURRENT_DIR/bin/coding-agents-tmux' status --tone --provider '$provider'"
