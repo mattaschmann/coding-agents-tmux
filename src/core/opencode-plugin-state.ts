@@ -320,9 +320,15 @@ export class SessionScopeTracker {
       return;
     }
 
-    this.parents.set(sessionId, parentId);
+    // A payload can omit info.parentID (extractor returns null) without meaning
+    // "this is a root" — absent ≠ parentless. If we already recorded a non-null
+    // parent for this id, keep it so a later metadata-light session.updated can't
+    // silently promote a known child to root.
+    const known = this.parents.get(sessionId);
+    const resolvedParent = parentId === null && known != null ? known : parentId;
+    this.parents.set(sessionId, resolvedParent);
 
-    if (parentId === null) {
+    if (resolvedParent === null) {
       const ancestor = this.resolveAncestor(sessionId);
       if (this.rootId === null || this.rootId === sessionId || this.rootId === ancestor) {
         this.rootId = ancestor;
@@ -656,8 +662,18 @@ export function applyDerivedStatus(input: {
     // authoritative === null: fall through to event-derived heuristics.
   }
 
-  // A child going idle must never idle the pane; only a root-scoped idle may.
-  if (!isChild && (status === "idle" || busy === false)) {
+  // A child idle signal (session.idle, status "idle", or busy === false) must
+  // never move the pane. Projecting "running" would clobber a root that has
+  // already gone idle; forcing "idle" would idle a still-busy root. With no
+  // authoritative answer above, preserve whatever the root derived — leave
+  // activity/status untouched and return.
+  if (isChild && (event.type === "session.idle" || status === "idle" || busy === false)) {
+    state.detail = `${event.type} child idle (root state preserved)`;
+    return;
+  }
+
+  // A root going idle: only a root-scoped idle may idle the pane.
+  if (status === "idle" || busy === false) {
     state.activity = "idle";
     state.status = "idle";
     state.detail = `${event.type} idle event`;
