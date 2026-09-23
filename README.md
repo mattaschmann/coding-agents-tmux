@@ -266,6 +266,34 @@ entered that state, and whether it has been seen). It is derived data and safe
 to delete — cycling simply starts from a clean slate, treating every pane as
 unseen again.
 
+## OpenCode session tabs
+
+OpenCode's V2 TUI can hold several sessions in one pane as tabs. Only the
+focused tab is visible, so a background tab blocked on a prompt would otherwise
+go unnoticed — no glyph change and no notification, exactly the case the
+indicator exists for.
+
+When a pane has tabs, its reported state is the **roll-up** across all of them:
+the pane shows the highest-attention state any tab is in. So a background tab
+waiting on a permission or question prompt makes the whole pane render waiting —
+it lights up in the [status line](#status-line), fires your notify command, and
+[cycling](#smart-cycling) treats it as top priority — even while the tab you are
+looking at sits idle. The focused tab still owns the pane's title and session
+identity; the roll-up only ever raises the reported attention, never lowers it,
+so a prompt on the focused tab is never masked by an idle background tab.
+
+`inspect` shows the per-tab breakdown for a multi-tab pane, with `*` marking the
+focused tab:
+
+```text
+Tabs
+    waiting-input  Weekly update  [ses_…]
+  * idle           Main task      [ses_…]
+```
+
+This is automatic and needs no configuration. Panes without tabs (and OpenCode
+V1) are unaffected — their state is reported exactly as before.
+
 ## Status line
 
 When enabled, the status line shows two views at once:
