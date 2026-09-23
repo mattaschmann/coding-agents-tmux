@@ -84,6 +84,19 @@ export interface RuntimeInfo {
   match: RuntimeMatchInfo;
   session: SessionMatch | null;
   detail: string;
+  // Per-tab breakdown for an OpenCode V2 pane running with session tabs enabled.
+  // Present only when the plugin recorded a `tabs` roll-up; `status` is the
+  // aggregate (highest-attention tab or the focused-tab latch, whichever wins).
+  tabs?: PaneTabInfo[];
+}
+
+export interface PaneTabInfo {
+  sessionId: string;
+  title: string;
+  status: RuntimeStatus;
+  activity: RuntimeActivity;
+  active: boolean;
+  updatedAt: number;
 }
 
 export interface PaneRuntimeSummary extends DiscoveredPane {

@@ -15,11 +15,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import {
   type PluginEvent,
   PromptLatch,
+  type TabListEntry,
+  type WaitingStatus,
   applyDerivedStatus,
   createInitialState,
   getEventSessionId,
   getPluginStateDir,
   normalizeEnvValue,
+  snapshotTabs,
   toStateFileName,
 } from "../../src/core/opencode-plugin-state.ts";
 
@@ -42,6 +45,10 @@ interface TuiContext {
     router?: {
       current(): { type: string; sessionID?: string } | undefined;
     };
+    tabs?: {
+      enabled(): boolean;
+      list(): TabListEntry[];
+    };
   };
   data: {
     listen(handler: (event: { details: TuiEvent }) => void): () => void;
@@ -52,6 +59,9 @@ interface TuiContext {
       root(sessionID: string): string;
       get?(sessionID: string): { title?: string } | undefined;
       status?(sessionID: string): "idle" | "running";
+      family?(sessionID: string): string[];
+      permission?: { list(sessionID: string): unknown[] | undefined };
+      form?: { list(sessionID: string): unknown[] | undefined };
     };
   };
 }
@@ -150,6 +160,80 @@ export default {
       }
     }
 
+    // Session tabs are on when the TUI exposes `ui.tabs` and reports enabled.
+    // When off (or on V1), every tab-aware branch below is skipped and the file
+    // takes the exact pre-tabs code path.
+    function tabsEnabled(): boolean {
+      try {
+        return Boolean(context.ui?.tabs?.enabled?.());
+      } catch {
+        return false;
+      }
+    }
+
+    // Latest `ui.tabs.list()` snapshot, re-read per event. Empty when tabs are
+    // disabled so callers can treat "no tabs" uniformly.
+    function readTabList(): TabListEntry[] {
+      if (!tabsEnabled()) {
+        return [];
+      }
+      try {
+        return context.ui?.tabs?.list?.() ?? [];
+      } catch {
+        return [];
+      }
+    }
+
+    // Every session id in a tab's family, so an event for a subagent of any tab
+    // is still recognized as belonging to this pane. Mirrors the TUI's own
+    // `family(id) || [id]` fallback: `session.family()` returns [] for a session
+    // with no recorded children, which must still resolve to itself.
+    function familyOf(sessionId: string): string[] {
+      const family = context.data.session.family;
+      if (!family) {
+        return [sessionId];
+      }
+      try {
+        const members = family(sessionId);
+        return members && members.length > 0 ? members : [sessionId];
+      } catch {
+        return [sessionId];
+      }
+    }
+
+    function listHasPending(
+      probe: { list(sessionID: string): unknown[] | undefined } | undefined,
+      sessionId: string,
+    ): boolean {
+      if (!probe) {
+        return false;
+      }
+      try {
+        return (probe.list(sessionId)?.length ?? 0) > 0;
+      } catch {
+        return false;
+      }
+    }
+
+    // Re-derive the attention *kind* for a tab flagged `attention`. The plugin
+    // boundary flattens it to a boolean, so walk the tab's family and check the
+    // (global, event-fed) permission/form stores: a pending permission ⇒
+    // waiting-input, else a pending form ⇒ waiting-question. Matches the TUI's
+    // own internal derivation order.
+    function resolveTabAttention(sessionId: string): WaitingStatus | null {
+      for (const member of familyOf(sessionId)) {
+        if (listHasPending(context.data.session.permission, member)) {
+          return "waiting-input";
+        }
+      }
+      for (const member of familyOf(sessionId)) {
+        if (listHasPending(context.data.session.form, member)) {
+          return "waiting-question";
+        }
+      }
+      return null;
+    }
+
     // The session this pane's TUI is currently displaying. A resumed session
     // (opencode --continue, or any already-open session) lands here; a fresh
     // start lands on `home`. This is the primary identity + seed source.
@@ -200,12 +284,17 @@ export default {
       }
     }
 
+    // Membership of the pane's own (focused) session family, following the
+    // route. This governs the top-level identity/status fields.
     function eventBelongsToPane(event: PluginEvent, sessionId: string | null): boolean {
       const eventDir = (event.location as TuiLocationRef | undefined)?.directory;
 
       // Location guard: an event that declares a *different* directory is never
       // ours. Events without a location field pass and are disambiguated below.
-      if (paneDirectory && eventDir && eventDir !== paneDirectory) {
+      // Skipped when tabs are enabled: tabs can span directories (`scope:
+      // "global"`), so a foreign-directory tab is still ours — membership is
+      // then decided by the tab list (see eventBelongsToAnyTab).
+      if (!tabsEnabled() && paneDirectory && eventDir && eventDir !== paneDirectory) {
         return false;
       }
 
@@ -233,6 +322,17 @@ export default {
       return false;
     }
 
+    // Whether an event belongs to *any* listed tab's family. Used only when
+    // tabs are enabled: a background-tab event must trigger a persist so the
+    // roll-up refreshes, even though it does not own the top-level identity.
+    function eventBelongsToAnyTab(sessionId: string | null): boolean {
+      if (!sessionId) {
+        return false;
+      }
+      const eventRoot = rootOf(sessionId);
+      return readTabList().some((tab) => rootOf(tab.sessionID) === eventRoot);
+    }
+
     // Root/child scoping relative to the pane's current session family. The
     // family root is "root"; any other session (a subagent/child) is "child".
     function classifyScope(sessionId: string | null): "root" | "child" | "unknown" {
@@ -241,6 +341,18 @@ export default {
       }
       const familyRoot = currentSessionId ? rootOf(currentSessionId) : rootOf(sessionId);
       return sessionId === familyRoot ? "root" : "child";
+    }
+
+    // Refresh `state.tabs` from the latest tab list, or clear it when tabs are
+    // disabled. A pure projection — never accumulated — so a closed tab drops on
+    // the next event.
+    function refreshTabSnapshot(): void {
+      const list = readTabList();
+      if (list.length === 0) {
+        delete state.tabs;
+        return;
+      }
+      state.tabs = snapshotTabs(list, resolveTabAttention);
     }
 
     function persist(): void {
@@ -265,33 +377,43 @@ export default {
 
       const sessionId = getEventSessionId(event);
 
-      if (!eventBelongsToPane(event, sessionId)) {
+      const ownsIdentity = eventBelongsToPane(event, sessionId);
+      // A background-tab event does not own the identity but must still refresh
+      // the roll-up. Only relevant when tabs are enabled.
+      const belongsToTab = !ownsIdentity && tabsEnabled() && eventBelongsToAnyTab(sessionId);
+
+      if (!ownsIdentity && !belongsToTab) {
         return;
       }
 
-      applyDerivedStatus({
-        state,
-        event,
-        latch,
-        classifyScope,
-        authoritativeStatus: sessionStatusOf,
-      });
+      // Only the focused session's events write the top-level identity/status.
+      if (ownsIdentity) {
+        applyDerivedStatus({
+          state,
+          event,
+          latch,
+          classifyScope,
+          authoritativeStatus: sessionStatusOf,
+        });
 
-      // Re-elect on deletion of the tracked session so the pane can adopt the
-      // next session (via the route) instead of going deaf.
-      if (
-        event.type === "session.deleted" &&
-        sessionId &&
-        currentSessionId &&
-        rootOf(sessionId) === rootOf(currentSessionId)
-      ) {
-        currentSessionId = null;
+        // Re-elect on deletion of the tracked session so the pane can adopt the
+        // next session (via the route) instead of going deaf.
+        if (
+          event.type === "session.deleted" &&
+          sessionId &&
+          currentSessionId &&
+          rootOf(sessionId) === rootOf(currentSessionId)
+        ) {
+          currentSessionId = null;
+        }
       }
 
+      refreshTabSnapshot();
       persist();
       scheduleTmuxStatusRefresh();
     });
 
+    refreshTabSnapshot();
     persist();
     scheduleTmuxStatusRefresh();
 

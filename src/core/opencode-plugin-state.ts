@@ -399,6 +399,67 @@ export interface PluginState {
   detail: string;
   updatedAt: number;
   sourceEventType: string;
+  // Per-tab roll-up, present only when the V2 TUI runs with session tabs
+  // enabled. A pure projection of `ui.tabs.list()` at persist time — never
+  // accumulated — so a closed tab drops on the next event. The top-level
+  // status/activity fields keep focused-tab semantics; `tabs` is additive.
+  tabs?: PluginTabState[];
+}
+
+export interface PluginTabState {
+  sessionId: string;
+  title: string;
+  status: PluginStatus;
+  activity: PluginActivity;
+  active: boolean;
+  updatedAt: number;
+}
+
+// Minimal shape of one entry from `context.ui.tabs.list()`. `attention` is a
+// boolean at the plugin boundary (the TUI flattens "permission"|"question" with
+// `Boolean(...)`), so the attention *kind* is recovered via `resolveAttention`.
+export interface TabListEntry {
+  sessionID: string;
+  title?: string;
+  active?: boolean;
+  busy?: boolean;
+  attention?: boolean;
+}
+
+// Map a `ui.tabs.list()` snapshot to per-tab plugin state. `resolveAttention`
+// re-derives the waiting kind for a tab flagged `attention` (see the tui.ts
+// resolver, which walks `session.family(id)` → permission.list → form.list).
+// A pure projection: callers rebuild `tabs[]` wholesale each event so a closed
+// tab cannot linger.
+export function snapshotTabs(
+  list: TabListEntry[],
+  resolveAttention: (sessionId: string) => WaitingStatus | null,
+  now: number = Date.now(),
+): PluginTabState[] {
+  return list.map((tab) => {
+    let status: PluginStatus;
+    let activity: PluginActivity;
+
+    if (tab.attention) {
+      status = resolveAttention(tab.sessionID) ?? "waiting-input";
+      activity = "busy";
+    } else if (tab.busy) {
+      status = "running";
+      activity = "busy";
+    } else {
+      status = "idle";
+      activity = "idle";
+    }
+
+    return {
+      sessionId: tab.sessionID,
+      title: tab.title ?? "",
+      status,
+      activity,
+      active: Boolean(tab.active),
+      updatedAt: now,
+    };
+  });
 }
 
 export const SESSION_LIFECYCLE_EVENTS = new Set([

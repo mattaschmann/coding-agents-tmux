@@ -182,6 +182,105 @@ test("plugin provider matches panes by target, pane id, and directory state", as
   }
 });
 
+test("plugin provider rolls up the highest-attention tab over an idle focused tab", async () => {
+  const pluginStateDir = createPluginStateDir([
+    {
+      target: "work:1.0",
+      paneId: "%1",
+      directory: "/tmp/project-a",
+      title: "Session A",
+      // Focused tab is idle, but a background tab is blocked on a permission.
+      status: "idle",
+      activity: "idle",
+      updatedAt: 100,
+      tabs: [
+        {
+          sessionId: "ses_a",
+          title: "focused",
+          status: "idle",
+          activity: "idle",
+          active: true,
+          updatedAt: 100,
+        },
+        {
+          sessionId: "ses_b",
+          title: "background",
+          status: "waiting-input",
+          activity: "busy",
+          active: false,
+          updatedAt: 100,
+        },
+      ],
+    },
+  ]);
+  const restoreEnv = setEnv({ CODING_AGENTS_TMUX_STATE_DIR: pluginStateDir });
+
+  try {
+    const panes = [
+      createDiscoveredPane({ target: "work:1.0", paneId: "%1", currentPath: "/tmp/project-a" }),
+    ];
+    const summaries = await attachRuntimeToPanes(panes, { provider: "plugin" });
+
+    const runtime = getRuntime(getSummary(summaries, 0));
+    assert.equal(runtime.status, "waiting-input", "the waiting background tab wins the roll-up");
+    assert.equal(runtime.activity, "busy");
+    assert.equal(runtime.tabs?.length, 2, "per-tab detail is exposed for inspect");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("plugin roll-up is monotonic: a latched focused prompt beats idle tabs", async () => {
+  const pluginStateDir = createPluginStateDir([
+    {
+      target: "work:1.0",
+      paneId: "%1",
+      directory: "/tmp/project-a",
+      title: "Session A",
+      // Focused tab holds a latched waiting prompt; both listed tabs read idle
+      // (the derived resolver disagreed / raced). The top-level status must
+      // still win because the roll-up can only raise attention, never lower it.
+      status: "waiting-input",
+      activity: "busy",
+      updatedAt: 100,
+      tabs: [
+        {
+          sessionId: "ses_a",
+          title: "focused",
+          status: "idle",
+          activity: "idle",
+          active: true,
+          updatedAt: 100,
+        },
+        {
+          sessionId: "ses_b",
+          title: "background",
+          status: "idle",
+          activity: "idle",
+          active: false,
+          updatedAt: 100,
+        },
+      ],
+    },
+  ]);
+  const restoreEnv = setEnv({ CODING_AGENTS_TMUX_STATE_DIR: pluginStateDir });
+
+  try {
+    const panes = [
+      createDiscoveredPane({ target: "work:1.0", paneId: "%1", currentPath: "/tmp/project-a" }),
+    ];
+    const summaries = await attachRuntimeToPanes(panes, { provider: "plugin" });
+
+    assert.equal(
+      getRuntime(getSummary(summaries, 0)).status,
+      "waiting-input",
+      "the latched focused prompt must survive an idle tab roll-up",
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
 test("plugin provider uses safe descendant heuristics and leaves ambiguous panes unmapped", async () => {
   const pluginStateDir = createPluginStateDir([
     {

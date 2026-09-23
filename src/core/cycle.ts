@@ -20,7 +20,7 @@
 import type { CycleLedger } from "./cycle-ledger.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus } from "../types.ts";
 
-function getCycleTier(status: RuntimeStatus): number {
+export function getCycleTier(status: RuntimeStatus): number {
   switch (status) {
     case "waiting-question":
     case "waiting-input":
