@@ -1,4 +1,5 @@
 import { getEnvValue } from "../naming.ts";
+import { isWaitingStatus } from "../core/status.ts";
 import type { InspectResult, PaneRuntimeSummary } from "../types.ts";
 
 type StatusStyle = "plain" | "tmux";
@@ -331,7 +332,7 @@ export function getPaneStatusLabel(entry: PaneRuntimeSummary): string {
     return "new";
   }
 
-  if (entry.runtime.status === "waiting-question" || entry.runtime.status === "waiting-input") {
+  if (isWaitingStatus(entry.runtime.status)) {
     return "waiting";
   }
 
@@ -347,7 +348,7 @@ function getCurrentSymbol(entry: PaneRuntimeSummary): string {
 }
 
 function isWaitingEntry(entry: PaneRuntimeSummary): boolean {
-  return entry.runtime.status === "waiting-question" || entry.runtime.status === "waiting-input";
+  return isWaitingStatus(entry.runtime.status);
 }
 
 function getBackgroundEntryTone(

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { CycleLedger, CycleLedgerEntry } from "../src/core/cycle-ledger.ts";
-import { pickNextCyclePane, rankPanesForCycle } from "../src/core/cycle.ts";
+import { pickNextCyclePane, pickWaitingTabToDrain, rankPanesForCycle } from "../src/core/cycle.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus, TmuxPane } from "../src/types.ts";
 
 function createPane(target: PaneTarget, paneId: string): TmuxPane {
@@ -301,4 +301,93 @@ test("pickNextCyclePane falls through when the only unseen pane is the current o
   const ranked = rankPanesForCycle(panes, ledger);
   const next = pickNextCyclePane(ranked, "work:1.0", ledger);
   assert.equal(next?.pane.paneId, "%seenIdle");
+});
+
+function withTabs(
+  summary: PaneRuntimeSummary,
+  tabs: Array<{ sessionId: string; status: RuntimeStatus; active?: boolean }>,
+): PaneRuntimeSummary {
+  return {
+    ...summary,
+    runtime: {
+      ...summary.runtime,
+      tabs: tabs.map((tab) => ({
+        sessionId: tab.sessionId,
+        title: tab.sessionId,
+        status: tab.status,
+        activity: tab.status === "idle" || tab.status === "new" ? "idle" : "busy",
+        active: tab.active ?? false,
+        updatedAt: 0,
+      })),
+    },
+  };
+}
+
+test("pickWaitingTabToDrain: a background waiting tab outranks a lower-tier next pane", () => {
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), [
+    { sessionId: "ses_a", status: "running", active: true },
+    { sessionId: "ses_b", status: "waiting-input" },
+  ]);
+  const next = createSummary("work:1.1", "%next", "idle");
+  assert.equal(pickWaitingTabToDrain(current, next, ledgerOf({})), 2);
+});
+
+test("pickWaitingTabToDrain: ties (both tier 0) keep the user on the local tab", () => {
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), [
+    { sessionId: "ses_a", status: "running", active: true },
+    { sessionId: "ses_b", status: "waiting-question" },
+  ]);
+  const next = createSummary("work:1.1", "%next", "waiting-input");
+  assert.equal(pickWaitingTabToDrain(current, next, ledgerOf({})), 2);
+});
+
+test("pickWaitingTabToDrain: a seen tab is not re-selected (drain self-terminates)", () => {
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), [
+    { sessionId: "ses_a", status: "running", active: true },
+    { sessionId: "ses_b", status: "waiting-input" },
+  ]);
+  const next = createSummary("work:1.1", "%next", "idle");
+  const ledger = ledgerOf({ "%cur:ses_b": { observedStatus: "waiting-input", seen: true } });
+  assert.equal(pickWaitingTabToDrain(current, next, ledger), null);
+});
+
+test("pickWaitingTabToDrain: oldest statusSince wins among unseen waiting tabs", () => {
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), [
+    { sessionId: "ses_new", status: "waiting-input" },
+    { sessionId: "ses_old", status: "waiting-input" },
+  ]);
+  const next = createSummary("work:1.1", "%next", "idle");
+  const ledger = ledgerOf({
+    "%cur:ses_new": { observedStatus: "waiting-input", statusSince: 500 },
+    "%cur:ses_old": { observedStatus: "waiting-input", statusSince: 100 },
+  });
+  assert.equal(pickWaitingTabToDrain(current, next, ledger), 2);
+});
+
+test("pickWaitingTabToDrain: a tab past index 10 is not addressable", () => {
+  const tabs = Array.from({ length: 11 }, (_unused, i) => ({
+    sessionId: `ses_${i}`,
+    status: i === 10 ? ("waiting-input" as RuntimeStatus) : ("running" as RuntimeStatus),
+  }));
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), tabs);
+  const next = createSummary("work:1.1", "%next", "idle");
+  assert.equal(pickWaitingTabToDrain(current, next, ledgerOf({})), null);
+});
+
+test("pickWaitingTabToDrain: only the focused tab waiting ⇒ null (still selectable but stays)", () => {
+  // A focused (active) waiting tab is still a valid drain target only if unseen;
+  // here it is unseen so it qualifies — the guard against re-selecting it is
+  // the ledger, not the active flag. With a lower-tier next pane it stays.
+  const current = withTabs(createSummary("work:1.0", "%cur", "waiting-input"), [
+    { sessionId: "ses_a", status: "waiting-input", active: true },
+    { sessionId: "ses_b", status: "idle" },
+  ]);
+  const next = createSummary("work:1.1", "%next", "idle");
+  assert.equal(pickWaitingTabToDrain(current, next, ledgerOf({})), 1);
+});
+
+test("pickWaitingTabToDrain: no tabs ⇒ null (falls through to pane switch)", () => {
+  const current = createSummary("work:1.0", "%cur", "waiting-input");
+  const next = createSummary("work:1.1", "%next", "idle");
+  assert.equal(pickWaitingTabToDrain(current, next, ledgerOf({})), null);
 });

@@ -26,8 +26,10 @@ import {
   installCodexIntegration,
   persistCodexHookState,
 } from "./core/codex.ts";
-import { observePane, readCycleLedger } from "./core/cycle-ledger.ts";
-import { pickNextCyclePane, rankPanesForCycle } from "./core/cycle.ts";
+import { observePane, readCycleLedger, tabLedgerKey } from "./core/cycle-ledger.ts";
+import { pickNextCyclePane, pickWaitingTabToDrain, rankPanesForCycle } from "./core/cycle.ts";
+import { focusWaitingTab, selectTab } from "./core/focus-tab.ts";
+import { isWaitingStatus } from "./core/status.ts";
 import { notifyIntegration } from "./core/notifications.ts";
 import { buildInspectDebugInfo, buildServerMapTemplate } from "./core/opencode.ts";
 import { attachRuntimeToPanes, getRuntimeProviderHelpText } from "./core/runtime.ts";
@@ -328,13 +330,14 @@ export function filterPaneSummaries(
       return false;
     }
 
-    if (options.waiting && !["waiting-question", "waiting-input"].includes(entry.runtime.status)) {
+    if (options.waiting && !isWaitingStatus(entry.runtime.status)) {
       return false;
     }
 
     if (
       options.busy &&
-      !["running", "waiting-question", "waiting-input"].includes(entry.runtime.status)
+      entry.runtime.status !== "running" &&
+      !isWaitingStatus(entry.runtime.status)
     ) {
       return false;
     }
@@ -485,6 +488,7 @@ async function runSwitchFilteredCommand(
   const client = options.client ? await resolveTmuxClient(options.client) : undefined;
 
   await switchToPane(pane.pane, client);
+  await focusWaitingTab(pane, client);
 }
 
 async function runCycleCommand(options: SwitchOptions): Promise<void> {
@@ -505,14 +509,40 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
   const ranked = rankPanesForCycle(panes, ledger);
   const next = pickNextCyclePane(ranked, currentTarget, ledger);
 
+  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
+
+  // Before leaving the current pane, drain any higher-or-equal-priority waiting
+  // tab within it: focus that tab and stay put. Marks the tab seen from our own
+  // send (not the lagging `active` flag) so draining is one tab per press and
+  // self-terminates once all its waiting tabs are seen.
+  const currentPane =
+    currentTarget !== null
+      ? (panes.find((entry) => entry.pane.target === currentTarget) ?? null)
+      : null;
+
+  if (currentPane && currentPane.detection.agent === "opencode") {
+    const tabIndex = pickWaitingTabToDrain(currentPane, next, ledger);
+
+    if (tabIndex !== null) {
+      const tab = currentPane.runtime.tabs?.[tabIndex - 1];
+
+      if (tab) {
+        await selectTab(currentPane, tabIndex, client);
+        observePane(tabLedgerKey(currentPane.pane.paneId, tab.sessionId), tab.status, true, now);
+        await runCommand(["tmux", "refresh-client", "-S"]);
+        return;
+      }
+    }
+  }
+
   if (!next) {
     await displayTmuxMessage("coding-agents-tmux: no other agent pane to cycle to");
     return;
   }
 
-  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
   await switchToPane(next.pane, client);
   observePane(next.pane.paneId, next.runtime.status, true, now);
+  await focusWaitingTab(next, client);
 
   // Refresh the status line immediately so the indicators reflect the jump
   // without waiting for tmux's next natural redraw tick.
@@ -534,6 +564,7 @@ async function runPopupUiCommand(options: PopupUiOptions): Promise<void> {
   }
 
   await switchToPane(pane.pane, options.client);
+  await focusWaitingTab(pane, options.client);
   process.exit(0);
 }
 
@@ -719,10 +750,7 @@ export function buildStatusOutput(
       const countStatus = (status: RuntimeStatus) =>
         panes.filter((entry) => entry.runtime.status === status).length;
       const busy = panes.filter((entry) => entry.runtime.activity === "busy").length;
-      const waiting = panes.filter(
-        (entry) =>
-          entry.runtime.status === "waiting-question" || entry.runtime.status === "waiting-input",
-      ).length;
+      const waiting = panes.filter((entry) => isWaitingStatus(entry.runtime.status)).length;
       return JSON.stringify(
         {
           mode: "summary",

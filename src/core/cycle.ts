@@ -17,14 +17,16 @@
 // glancing at a pane blocked on a prompt discharges nothing — only replying
 // does — so a still-waiting pane must never sink below an unseen lower tier.
 
-import type { CycleLedger } from "./cycle-ledger.ts";
+import { type CycleLedger, tabLedgerKey } from "./cycle-ledger.ts";
+import { isWaitingStatus } from "./status.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus } from "../types.ts";
 
 export function getCycleTier(status: RuntimeStatus): number {
+  if (isWaitingStatus(status)) {
+    return 0;
+  }
+
   switch (status) {
-    case "waiting-question":
-    case "waiting-input":
-      return 0;
     case "idle":
       return 1;
     case "new":
@@ -123,4 +125,76 @@ export function pickNextCyclePane(
   }
 
   return ring[(currentIndex + 1) % ring.length] ?? null;
+}
+
+// Highest addressable session-tab select index (`session.tab.select.1`..`.10`).
+const MAX_SELECTABLE_TAB_INDEX = 10;
+
+/**
+ * Choose a waiting tab *within the current pane* to focus before cycle would
+ * leave for another pane. Returns the 1-based select index (usable with
+ * `session.tab.select.N`) or null to fall through to a pane switch.
+ *
+ * A tab qualifies when it is waiting, unseen in the ledger (tab key), within the
+ * addressable index range, and its attention tier is at least as high as the
+ * pane cycle would move to next. The current pane is drained tab-by-tab this way
+ * until every waiting tab is seen, then cycling resumes between panes — the same
+ * self-terminating shape as the pane-level unseen ring.
+ *
+ * Deliberately independent of the tabs' `active` flag (which lags a `C-x N`
+ * switch): "waiting" is event-fresh, and the caller marks the chosen tab seen
+ * from its own send action.
+ */
+export function pickWaitingTabToDrain(
+  currentPane: PaneRuntimeSummary,
+  nextPane: PaneRuntimeSummary | null,
+  ledger: CycleLedger,
+): number | null {
+  const tabs = currentPane.runtime.tabs ?? [];
+  if (tabs.length === 0) {
+    return null;
+  }
+
+  const nextTier = nextPane ? getCycleTier(nextPane.runtime.status) : Number.POSITIVE_INFINITY;
+
+  interface TabCandidate {
+    index: number;
+    tier: number;
+    statusSince: number;
+  }
+  let best: TabCandidate | null = null;
+
+  for (let position = 0; position < tabs.length; position += 1) {
+    const tab = tabs[position];
+    if (!tab) {
+      continue;
+    }
+
+    const index = position + 1;
+    if (index > MAX_SELECTABLE_TAB_INDEX) {
+      continue;
+    }
+
+    if (!isWaitingStatus(tab.status)) {
+      continue;
+    }
+
+    const entry = ledger.get(tabLedgerKey(currentPane.pane.paneId, tab.sessionId));
+    if (entry?.seen) {
+      continue;
+    }
+
+    const tier = getCycleTier(tab.status);
+    // Stay only when the local tab is at least as high-priority as the next pane.
+    if (tier > nextTier) {
+      continue;
+    }
+
+    const statusSince = entry?.statusSince ?? 0;
+    if (!best || tier < best.tier || (tier === best.tier && statusSince < best.statusSince)) {
+      best = { index, tier, statusSince };
+    }
+  }
+
+  return best ? best.index : null;
 }

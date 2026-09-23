@@ -415,6 +415,9 @@ Available tmux options:
 - `@coding-agents-tmux-waiting-menu-key` waiting-only menu chooser key, default `W`
 - `@coding-agents-tmux-waiting-popup-key` waiting-only popup chooser key, default `C-w`
 - `@coding-agents-tmux-cycle-key` next-attention cycle key, default `C-n`
+- `@coding-agents-tmux-focus-waiting-tab` after switching to an OpenCode pane whose background session tab is waiting, focus that tab automatically; `on` or `off`, default `on`
+- `@coding-agents-tmux-focus-waiting-tab-key` key sequence sent to drive OpenCode's `session.tab.next_unread`, default `M-S-Down` (override if you rebound that command)
+- `@coding-agents-tmux-focus-waiting-tab-select-key` key sequence used to focus a specific tab by index when `cycle` drains a pane's higher-priority waiting tabs before moving on; `{n}` is replaced by the 1-based tab index, default `C-x {n}` (OpenCode's `session.tab.select.N` leader binding)
 - `@coding-agents-tmux-install-opencode-plugin` `on` or `off`, default `on`
 - `@coding-agents-tmux-install-pi-extension` `on` or `off`, default `on`
 - `@coding-agents-tmux-install-codex-hooks` `on` or `off`, default `on`
