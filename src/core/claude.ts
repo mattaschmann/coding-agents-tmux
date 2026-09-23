@@ -574,12 +574,12 @@ function getDirectoryFallbackClaudeState(
 // Claude's interactive prompts (permission requests, AskUserQuestion) render a
 // selectable list where the highlighted option is marked with an arrow glyph.
 // Requiring the arrow avoids misreading ordinary numbered prose in an assistant
-// message as a live prompt.
+// message as a live prompt. The arrow must sit on a numbered option: echoed
+// prompts and the input line also start with "❯", so a bare arrow would flag
+// every idle screen that has a bulleted answer above it.
 function hasInteractiveChoicePrompt(lines: string[]): boolean {
   const trimmed = lines.map((line) => line.trim());
-  const hasSelectionArrow = trimmed.some(
-    (line) => /^[❯›>]\s*\d+\.\s+\S/.test(line) || /^[❯›>]\s+\S/.test(line),
-  );
+  const hasSelectionArrow = trimmed.some((line) => /^[❯›>]\s*\d+\.\s+\S/.test(line));
 
   return hasSelectionArrow && countChoiceLines(lines.join("\n")) >= 2;
 }
@@ -816,6 +816,20 @@ export function buildClaudeHooksTemplate(command: string): string {
 // "running" events from lingering after Claude has gone idle.
 const CLAUDE_HOOK_WAIT_FRESHNESS_MS = 60_000;
 
+// Right after UserPromptSubmit or Stop, the hook fires before Claude redraws, so
+// the pane preview still shows the previous turn ("esc to interrupt" lingering
+// at Stop, absent at submit). For a few seconds the hook is the better signal.
+const CLAUDE_HOOK_TRANSITION_FRESHNESS_MS = 3_000;
+const CLAUDE_TRANSITION_EVENTS = new Set(["UserPromptSubmit", "Stop"]);
+
+function isFreshClaudeTransition(state: ClaudeStateFile | null): state is ClaudeStateFile {
+  if (!state?.sourceEventType || !CLAUDE_TRANSITION_EVENTS.has(state.sourceEventType)) {
+    return false;
+  }
+
+  return Date.now() - (state.updatedAt ?? 0) < CLAUDE_HOOK_TRANSITION_FRESHNESS_MS;
+}
+
 function isFreshClaudeWait(state: ClaudeStateFile | null): state is ClaudeStateFile {
   if (!state?.status?.startsWith("waiting")) {
     return false;
@@ -845,6 +859,17 @@ export async function attachRuntimeWithClaude(
             ...entry,
             runtime: classifyClaudeState(hookState, {
               detail: "matched fresh Claude hook wait state",
+              heuristic: false,
+              strategy: "exact",
+            }),
+          };
+        }
+
+        if (preview.status !== "waiting-question" && isFreshClaudeTransition(hookState)) {
+          return {
+            ...entry,
+            runtime: classifyClaudeState(hookState, {
+              detail: "matched fresh Claude hook transition",
               heuristic: false,
               strategy: "exact",
             }),

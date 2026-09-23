@@ -40,7 +40,7 @@ import {
   resolveTmuxClient,
   switchToPane,
 } from "./core/tmux.ts";
-import { getEnvValue, getStateHome, PRIMARY_CLI_NAME } from "./naming.ts";
+import { getStatusCacheDir, PRIMARY_CLI_NAME } from "./naming.ts";
 import { runCommand, sleep } from "./runtime.ts";
 import type {
   InspectResult,
@@ -827,17 +827,10 @@ async function runStatusCommand(options: StatusOptions): Promise<void> {
   }
 }
 
-function statusCacheDir(): string {
-  return (
-    getEnvValue("CODING_AGENTS_TMUX_STATUS_CACHE_DIR") ??
-    join(getStateHome(), "coding-agents-tmux", "status-cache")
-  );
-}
-
 function writeStatusCache(variant: string, content: string): void {
   // Best-effort: a cache write must never break the status render.
   try {
-    const dir = statusCacheDir();
+    const dir = getStatusCacheDir();
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${variant}.txt`);
     const tempFile = `${file}.${process.pid}.tmp`;

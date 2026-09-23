@@ -7,38 +7,46 @@
 //
 // This entry is intentionally dependency-light — only node built-ins, no
 // commander/core imports — so it starts in ~30ms. It prints a cached render
-// when the cache is at least as new as the newest plugin-state file; otherwise
-// it exits non-zero so the caller can fall back to a full render. The full
+// when the cache is at least as new as the newest agent state file (any
+// provider) and, if a max age is given, not older than it; otherwise it exits
+// non-zero so the caller can fall back to a full render. The full
 // `status` command writes the cache (see writeStatusCache in cli.ts).
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
-function stateHome(): string {
-  return process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
+import {
+  getEnvValue,
+  getStateRoot,
+  getStatusCacheDir,
+  STATE_DIR_ENVS,
+  STATUS_CACHE_SUBDIR,
+} from "./naming.ts";
+
+// Directories whose *.json mtimes gate the cache: every subdirectory of the
+// state root (plugin, claude, codex, pi, cycle ledger, ...) so new providers are
+// covered without a fixed list, plus any env-relocated state dir. The cycle
+// ledger is included because acknowledging a pane (seen) changes the render
+// without touching a provider file.
+function stateInputDirs(): string[] {
+  const root = getStateRoot();
+  let rootDirs: string[] = [];
+  try {
+    rootDirs = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== STATUS_CACHE_SUBDIR)
+      .map((entry) => join(root, entry.name));
+  } catch {
+    // no state root yet; env-relocated dirs may still exist
+  }
+  const overrides = STATE_DIR_ENVS.flatMap((name) => getEnvValue(name) ?? []);
+  return [...new Set([...rootDirs, ...overrides])];
 }
 
-function pluginStateDir(): string {
-  return (
-    process.env.CODING_AGENTS_TMUX_STATE_DIR ??
-    join(stateHome(), "coding-agents-tmux", "plugin-state")
-  );
-}
-
-function cacheDir(): string {
-  return (
-    process.env.CODING_AGENTS_TMUX_STATUS_CACHE_DIR ??
-    join(stateHome(), "coding-agents-tmux", "status-cache")
-  );
-}
-
-// Newest mtime across plugin-state files: the freshness watermark the cache
-// must meet or beat. Also factors in the cycle ledger, since acknowledging a
-// pane (seen) changes the render without touching a plugin-state file.
-function newestInputMtime(): number {
+// Newest mtime across stateInputDirs(): the freshness watermark the cache must
+// meet or beat.
+export function newestInputMtime(): number {
   let newest = 0;
-  for (const dir of [pluginStateDir(), join(stateHome(), "coding-agents-tmux", "cycle-state")]) {
+  for (const dir of stateInputDirs()) {
     let entries: string[];
     try {
       entries = readdirSync(dir);
@@ -64,11 +72,15 @@ function newestInputMtime(): number {
 
 // variant is passed by the caller (status style / tone) so distinct renders do
 // not clobber each other. Returns the cached string when fresh, or null on a
-// miss/stale/error so the caller falls back to a full render.
+// miss/stale/error so the caller falls back to a full render. maxAgeMs (0 or
+// omitted = unlimited) bounds staleness for changes no state file records, such
+// as a pane going idle after an interrupt.
 export function readFreshCache(input: {
   variant: string | undefined;
   cacheFile: string;
   newestInput: number;
+  maxAgeMs?: number;
+  now?: number;
 }): string | null {
   if (!input.variant) {
     return null;
@@ -85,6 +97,10 @@ export function readFreshCache(input: {
     return null; // stale — let the caller do a full render
   }
 
+  if (input.maxAgeMs && (input.now ?? Date.now()) - cacheStat.mtimeMs > input.maxAgeMs) {
+    return null; // expired — pane-only changes leave no state file behind
+  }
+
   try {
     return readFileSync(input.cacheFile, "utf8");
   } catch {
@@ -98,9 +114,11 @@ function main(): number {
     return 1;
   }
 
+  const maxAgeMs = Number(process.argv[3]);
   const cached = readFreshCache({
     variant,
-    cacheFile: join(cacheDir(), `${variant}.txt`),
+    maxAgeMs: maxAgeMs > 0 ? maxAgeMs : 0,
+    cacheFile: join(getStatusCacheDir(), `${variant}.txt`),
     newestInput: newestInputMtime(),
   });
 

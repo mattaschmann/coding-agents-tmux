@@ -9,6 +9,7 @@ import {
   captureWindowPreview,
   buildSwitchToPaneCommand,
   chooseTmuxClient,
+  findWrappedForegroundCommand,
   detectAgentPane,
   discoverAgentPanes,
   discoverAgentPanesFromList,
@@ -17,6 +18,7 @@ import {
   normalizeCapturedPaneLines,
   parseListAllPanesOutput,
   parsePaneLine,
+  parseProcessTable,
   switchToPane,
 } from "../src/core/tmux.ts";
 import type { TmuxPane } from "../src/types.ts";
@@ -563,6 +565,81 @@ exit 1
     await assert.rejects(listAllPanes(), /tmux failed: list-panes/);
     await assert.rejects(getCurrentTmuxTarget(), /tmux failed: display-message/);
     await assert.rejects(capturePanePreview("work:1.0"), /tmux failed: capture-pane/);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("parsePaneLine reads the optional trailing pane_pid", () => {
+  const line = ["work", "1", "0", "%1", "zsh", "zsh", "/tmp", "1", "/dev/pts/1", "4242"].join("\t");
+
+  assert.equal(parsePaneLine(line).panePid, 4242);
+});
+
+test("parseProcessTable reduces comm to a basename and skips malformed rows", () => {
+  assert.deepEqual(
+    parseProcessTable("  10   1  10 /usr/bin/zsh\ngarbage\n  11  10  -1 kiro-cli-term\n"),
+    [
+      { pid: 10, ppid: 1, tpgid: 10, command: "zsh" },
+      { pid: 11, ppid: 10, tpgid: -1, command: "kiro-cli-term" },
+    ],
+  );
+});
+
+test("findWrappedForegroundCommand returns the deepest foreground descendant", () => {
+  const processes = parseProcessTable(
+    [
+      "7434 1674 7434 kiro-cli-term",
+      "7513 7434 13934 zsh",
+      "13934 7513 13934 claude",
+      "13940 13934 13934 node",
+    ].join("\n"),
+  );
+
+  assert.equal(findWrappedForegroundCommand(processes, 7434), "claude");
+});
+
+test("findWrappedForegroundCommand ignores background children and missing panes", () => {
+  const processes = parseProcessTable(
+    ["100 1 100 nvim", "101 100 500 claude", "200 1 200 zsh"].join("\n"),
+  );
+
+  assert.equal(findWrappedForegroundCommand(processes, 100), null);
+  assert.equal(findWrappedForegroundCommand(processes, 999), null);
+});
+
+test("discoverAgentPanes finds an agent running under a pty wrapper via the process table", async () => {
+  const fakeTmux = installFakeTmux(`
+if [ "$1" = "list-panes" ] && [ "$2" = "-a" ]; then
+  printf 'work\t1\t0\t%%1\tproject\tzsh\t/tmp/project\t1\t/dev/pts/1\t7434\n'
+  printf 'work\t1\t1\t%%2\tproject\tzsh\t/tmp/other\t0\t/dev/pts/2\t9000\n'
+  exit 0
+fi
+exit 1
+`);
+  writeFileSync(
+    join(fakeTmux.pathEntry, "ps"),
+    `#!/usr/bin/env bash
+if [ "$1" = "-A" ]; then
+  printf '7434 1674 7434 kiro-cli-term\\n7513 7434 13934 zsh\\n13934 7513 13934 claude\\n9000 1 9000 zsh\\n'
+  exit 0
+fi
+exit 1
+`,
+    "utf8",
+  );
+  chmodSync(join(fakeTmux.pathEntry, "ps"), 0o755);
+  const restoreEnv = setEnv({ PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}` });
+
+  try {
+    const panes = await discoverAgentPanes();
+
+    assert.deepEqual(
+      panes.map((entry) => entry.pane.target),
+      ["work:1.0"],
+    );
+    assert.equal(panes[0]?.detection.agent, "claude");
+    assert.ok(panes[0]?.detection.reasons.includes("process:foreground-descendant"));
   } finally {
     restoreEnv();
   }

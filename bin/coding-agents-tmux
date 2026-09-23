@@ -18,11 +18,12 @@ fi
 # Fast path for tmux status redraws: `status-cached <variant>` reads a cached
 # render via a dependency-light entry (~30ms) instead of loading the full CLI
 # graph (~130ms, over tmux's 100ms #() budget). Exits non-zero on a cache miss
-# so the caller can fall back to a full `status` render.
+# so the caller can fall back to a full `status` render. Optional third arg:
+# max cache age in milliseconds.
 if [ "${1:-}" = "status-cached" ]; then
   CACHE_CLI="$CURRENT_DIR/src/status-cache.ts"
   if [ -f "$CACHE_CLI" ]; then
-    exec node --disable-warning=ExperimentalWarning "$CACHE_CLI" "${2:-}"
+    exec node --disable-warning=ExperimentalWarning "$CACHE_CLI" "${2:-}" "${3:-}"
   fi
   exit 1
 fi

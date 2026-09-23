@@ -41,6 +41,7 @@ const TMUX_FIELDS = [
   "#{pane_current_path}",
   "#{pane_active}",
   "#{pane_tty}",
+  "#{pane_pid}",
 ] as const;
 
 const ANSI_ESCAPE_PATTERN = new RegExp(String.raw`\u001B\[[0-9;?]*[ -/]*[@-~]`, "g");
@@ -313,7 +314,8 @@ export function parseListAllPanesOutput(stdoutText: string): TmuxPane[] {
 export function parsePaneLine(line: string): TmuxPane {
   const parts = line.split("\t");
 
-  if (parts.length !== TMUX_FIELDS.length) {
+  // pane_pid is the trailing field; rows without it (older fixtures/wrappers) still parse.
+  if (parts.length !== TMUX_FIELDS.length && parts.length !== TMUX_FIELDS.length - 1) {
     throw new Error(`Unexpected tmux output: ${line}`);
   }
 
@@ -326,6 +328,7 @@ export function parsePaneLine(line: string): TmuxPane {
   const currentPath = parts[6];
   const paneActive = parts[7];
   const tty = parts[8];
+  const panePid = Number(parts[9]);
 
   if (
     sessionName === undefined ||
@@ -351,6 +354,7 @@ export function parsePaneLine(line: string): TmuxPane {
     currentPath,
     isActive: paneActive === "1",
     tty,
+    ...(Number.isInteger(panePid) && panePid > 0 ? { panePid } : {}),
     target: `${sessionName}:${Number(windowIndex)}.${Number(paneIndex)}`,
   };
 }
@@ -383,8 +387,83 @@ async function detectAgentPaneFromProcessArgs(pane: TmuxPane): Promise<PaneDetec
   };
 }
 
+export interface ProcessEntry {
+  command: string;
+  pid: number;
+  ppid: number;
+  tpgid: number;
+}
+
+// Parses `ps -A -o pid=,ppid=,tpgid=,comm=`. comm is reduced to its basename
+// because macOS reports full paths.
+export function parseProcessTable(stdoutText: string): ProcessEntry[] {
+  return stdoutText.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(.+?)\s*$/.exec(line);
+
+    if (!match) {
+      return [];
+    }
+
+    return [
+      {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        tpgid: Number(match[3]),
+        command: (match[4] ?? "").split("/").pop() ?? "",
+      },
+    ];
+  });
+}
+
+// Pty wrappers (e.g. kiro-cli-term) own the pane's tty, so tmux reports the
+// inner shell instead of the agent. The foreground process of the wrapped
+// terminal is the deepest descendant that leads its own tty's foreground group
+// (pid === tpgid); background children never qualify.
+export function findWrappedForegroundCommand(
+  processes: readonly ProcessEntry[],
+  panePid: number,
+): string | null {
+  const childrenByParent = new Map<number, ProcessEntry[]>();
+
+  for (const entry of processes) {
+    childrenByParent.set(entry.ppid, [...(childrenByParent.get(entry.ppid) ?? []), entry]);
+  }
+
+  let deepest: string | null = null;
+  let frontier = childrenByParent.get(panePid) ?? [];
+  const seen = new Set<number>([panePid]);
+
+  while (frontier.length > 0) {
+    const next: ProcessEntry[] = [];
+
+    for (const entry of frontier) {
+      if (seen.has(entry.pid)) {
+        continue;
+      }
+
+      seen.add(entry.pid);
+
+      if (entry.pid === entry.tpgid) {
+        deepest = entry.command;
+      }
+
+      next.push(...(childrenByParent.get(entry.pid) ?? []));
+    }
+
+    frontier = next;
+  }
+
+  return deepest;
+}
+
+async function readProcessTable(): Promise<ProcessEntry[]> {
+  const { stdoutText, exitCode } = await runCommand(["ps", "-A", "-o", "pid=,ppid=,tpgid=,comm="]);
+  return exitCode === 0 ? parseProcessTable(stdoutText) : [];
+}
+
 export async function discoverAgentPanes(): Promise<DiscoveredPane[]> {
   const panes = await listAllPanes();
+  let processTable: Promise<ProcessEntry[]> | null = null;
   const discovered = await Promise.all(
     panes.map(async (pane) => {
       const detection = detectAgentPane(pane);
@@ -394,9 +473,30 @@ export async function discoverAgentPanes(): Promise<DiscoveredPane[]> {
       }
 
       const processDetection = await detectAgentPaneFromProcessArgs(pane);
+
+      if (processDetection) {
+        return { pane, detection: processDetection };
+      }
+
+      if (pane.panePid === undefined) {
+        return { pane, detection };
+      }
+
+      processTable ??= readProcessTable();
+      const wrapped = findWrappedForegroundCommand(await processTable, pane.panePid);
+      const wrappedDetection = wrapped
+        ? detectAgentPane({ ...pane, currentCommand: wrapped })
+        : null;
+
       return {
         pane,
-        detection: processDetection ?? detection,
+        detection:
+          wrappedDetection?.agent != null
+            ? {
+                ...wrappedDetection,
+                reasons: [...wrappedDetection.reasons, "process:foreground-descendant"],
+              }
+            : detection,
       };
     }),
   );
