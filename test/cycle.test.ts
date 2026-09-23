@@ -165,7 +165,7 @@ test("rankPanesForCycle plus pickNextCyclePane visits every pane once before rep
   let current = order[0] ?? null;
 
   for (let step = 0; step < order.length; step += 1) {
-    const next = pickNextCyclePane(ranked, current);
+    const next = pickNextCyclePane(ranked, current, ledger);
     assert.ok(next);
     visited.push(next.pane.paneId);
     current = next.pane.target as PaneTarget;
@@ -180,9 +180,10 @@ test("pickNextCyclePane advances past the current pane and wraps around", () => 
     createSummary("work:1.1", "%2", "idle"),
     createSummary("work:1.2", "%3", "new"),
   ];
+  const ledger = ledgerOf({});
 
-  assert.equal(pickNextCyclePane(ranked, "work:1.0")?.pane.paneId, "%2");
-  assert.equal(pickNextCyclePane(ranked, "work:1.2")?.pane.paneId, "%1");
+  assert.equal(pickNextCyclePane(ranked, "work:1.0", ledger)?.pane.paneId, "%2");
+  assert.equal(pickNextCyclePane(ranked, "work:1.2", ledger)?.pane.paneId, "%1");
 });
 
 test("pickNextCyclePane returns the first pane when current is not in the queue", () => {
@@ -190,14 +191,114 @@ test("pickNextCyclePane returns the first pane when current is not in the queue"
     createSummary("work:1.0", "%1", "waiting-input"),
     createSummary("work:1.1", "%2", "idle"),
   ];
+  const ledger = ledgerOf({});
 
-  assert.equal(pickNextCyclePane(ranked, "work:9.9")?.pane.paneId, "%1");
-  assert.equal(pickNextCyclePane(ranked, null)?.pane.paneId, "%1");
+  assert.equal(pickNextCyclePane(ranked, "work:9.9", ledger)?.pane.paneId, "%1");
+  assert.equal(pickNextCyclePane(ranked, null, ledger)?.pane.paneId, "%1");
 });
 
 test("pickNextCyclePane returns null for an empty queue or a single current pane", () => {
-  assert.equal(pickNextCyclePane([], "work:1.0"), null);
+  assert.equal(pickNextCyclePane([], "work:1.0", ledgerOf({})), null);
 
   const single = [createSummary("work:1.0", "%1", "idle")];
-  assert.equal(pickNextCyclePane(single, "work:1.0"), null);
+  assert.equal(pickNextCyclePane(single, "work:1.0", ledgerOf({})), null);
+});
+
+test("pickNextCyclePane reaches an unseen pane first from a seen pane", () => {
+  const panes = [
+    createSummary("work:1.0", "%seenIdle", "idle"),
+    createSummary("work:1.1", "%unseenIdle", "idle"),
+  ];
+  const ledger = ledgerOf({
+    "%seenIdle": { observedStatus: "idle", seen: true },
+    "%unseenIdle": { observedStatus: "idle", seen: false },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+  // From the seen pane, the ring is just [%unseenIdle]; jump straight to it
+  // rather than walking the full list.
+  assert.equal(pickNextCyclePane(ranked, "work:1.0", ledger)?.pane.paneId, "%unseenIdle");
+});
+
+test("pickNextCyclePane drains the unseen ring then falls through to the full ring", () => {
+  const panes = [
+    createSummary("work:1.0", "%seen", "idle"),
+    createSummary("work:1.1", "%unseenA", "idle"),
+    createSummary("work:1.2", "%unseenB", "idle"),
+  ];
+  const ledger = ledgerOf({
+    "%seen": { observedStatus: "idle", statusSince: 1, seen: true },
+    "%unseenA": { observedStatus: "idle", statusSince: 2, seen: false },
+    "%unseenB": { observedStatus: "idle", statusSince: 3, seen: false },
+  });
+
+  // First two presses stay within the unseen ring (oldest-first: A then B).
+  let ranked = rankPanesForCycle(panes, ledger);
+  const first = pickNextCyclePane(ranked, "work:1.0", ledger);
+  assert.equal(first?.pane.paneId, "%unseenA");
+
+  ledger.set("%unseenA", { observedStatus: "idle", statusSince: 2, seen: true });
+  ranked = rankPanesForCycle(panes, ledger);
+  const second = pickNextCyclePane(ranked, first?.pane.target ?? null, ledger);
+  assert.equal(second?.pane.paneId, "%unseenB");
+
+  // Once the last unseen pane is visited, the ring falls through to the full
+  // list so every pane stays reachable.
+  ledger.set("%unseenB", { observedStatus: "idle", statusSince: 3, seen: true });
+  ranked = rankPanesForCycle(panes, ledger);
+  const visited = new Set<string>();
+  let current: PaneTarget | null = (second?.pane.target as PaneTarget) ?? null;
+  for (let step = 0; step < ranked.length; step += 1) {
+    const next = pickNextCyclePane(ranked, current, ledger);
+    assert.ok(next);
+    visited.add(next.pane.paneId);
+    current = next.pane.target as PaneTarget;
+  }
+  assert.deepEqual(visited.size, ranked.length);
+});
+
+test("pickNextCyclePane with one pending prompt still reaches every pane (no oscillation)", () => {
+  // Regression guard: a lone waiting pane is tier-0 seen-exempt for ordering,
+  // but ring membership uses raw `seen`, so a seen prompt does not trap cycling
+  // in a two-pane oscillation. The current pane is marked seen before ranking
+  // (mirrors runCycleCommand), so here every pane is seen.
+  const panes = [
+    createSummary("work:1.0", "%prompt", "waiting-input"),
+    createSummary("work:1.1", "%idleA", "idle"),
+    createSummary("work:1.2", "%idleB", "idle"),
+  ];
+  const ledger = ledgerOf({
+    "%prompt": { observedStatus: "waiting-input", statusSince: 1, seen: true },
+    "%idleA": { observedStatus: "idle", statusSince: 2, seen: true },
+    "%idleB": { observedStatus: "idle", statusSince: 3, seen: true },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+  const visited = new Set<string>();
+  let current: PaneTarget | null = "work:1.0";
+  for (let step = 0; step < ranked.length; step += 1) {
+    const next = pickNextCyclePane(ranked, current, ledger);
+    assert.ok(next);
+    visited.add(next.pane.paneId);
+    current = next.pane.target as PaneTarget;
+  }
+  assert.deepEqual(visited.size, ranked.length);
+});
+
+test("pickNextCyclePane falls through when the only unseen pane is the current one", () => {
+  // Sitting on the sole unacknowledged pane: the unseen ring collapses to just
+  // the current pane, so cycle must fall through to the full ring rather than
+  // returning null (going dead).
+  const panes = [
+    createSummary("work:1.0", "%unseenCurrent", "waiting-input"),
+    createSummary("work:1.1", "%seenIdle", "idle"),
+  ];
+  const ledger = ledgerOf({
+    "%unseenCurrent": { observedStatus: "waiting-input", seen: false },
+    "%seenIdle": { observedStatus: "idle", seen: true },
+  });
+
+  const ranked = rankPanesForCycle(panes, ledger);
+  const next = pickNextCyclePane(ranked, "work:1.0", ledger);
+  assert.equal(next?.pane.paneId, "%seenIdle");
 });
