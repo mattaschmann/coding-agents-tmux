@@ -501,8 +501,9 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
     );
   }
 
-  const ranked = rankPanesForCycle(panes, readCycleLedger());
-  const next = pickNextCyclePane(ranked, currentTarget);
+  const ledger = readCycleLedger();
+  const ranked = rankPanesForCycle(panes, ledger);
+  const next = pickNextCyclePane(ranked, currentTarget, ledger);
 
   if (!next) {
     await displayTmuxMessage("coding-agents-tmux: no other agent pane to cycle to");
