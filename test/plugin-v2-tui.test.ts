@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { TabListEntry } from "../src/core/opencode-plugin-state.ts";
+
 // Drives the V2 TUI entrypoint (plugin/coding-agents-tmux/tui.ts) with a fake
 // TUI context, exercising the `data.listen` subscription, `.data`-shaped event
 // payloads, `data.session.root()` scoping, `TMUX_PANE` keying, and cleanup.
@@ -54,6 +56,14 @@ function makeContext(input: {
   routeSession?: string;
   statuses?: Record<string, "idle" | "running">;
   titles?: Record<string, string>;
+  // When provided, the fake exposes `ui.tabs` and reports enabled. Mutable via
+  // the returned `setTabs` so tests can model a tab opening/closing.
+  tabs?: TabListEntry[];
+  // Session-family map (id → member ids) backing `data.session.family()`.
+  families?: Record<string, string[]>;
+  // Per-session pending prompts backing `permission.list()`/`form.list()`.
+  permissions?: Record<string, unknown[]>;
+  forms?: Record<string, unknown[]>;
 }) {
   let handler: ((event: { details: FakeEvent }) => void) | null = null;
   let unsubscribed = false;
@@ -61,6 +71,37 @@ function makeContext(input: {
   const statuses: Record<string, "idle" | "running"> = { ...input.statuses };
   const titles = input.titles ?? {};
   let routeSession: string | undefined = input.routeSession;
+  let tabs: TabListEntry[] | undefined = input.tabs ? [...input.tabs] : undefined;
+  const families = input.families ?? {};
+  const permissions = input.permissions ?? {};
+  const forms = input.forms ?? {};
+
+  const sessionApi: Record<string, unknown> = {
+    root(sessionID: string): string {
+      return roots[sessionID] ?? sessionID;
+    },
+    get(sessionID: string): { title?: string } | undefined {
+      return titles[sessionID] ? { title: titles[sessionID] } : undefined;
+    },
+    status(sessionID: string): "idle" | "running" {
+      // Default to running when unknown, matching V2 (an active session the
+      // TUI is displaying); tests set idle explicitly to model turn end.
+      return statuses[sessionID] ?? "running";
+    },
+    family(sessionID: string): string[] {
+      return families[sessionID] ?? [];
+    },
+    permission: {
+      list(sessionID: string): unknown[] | undefined {
+        return permissions[sessionID];
+      },
+    },
+    form: {
+      list(sessionID: string): unknown[] | undefined {
+        return forms[sessionID];
+      },
+    },
+  };
 
   const context = {
     location: input.directory ? { directory: input.directory } : undefined,
@@ -70,6 +111,18 @@ function makeContext(input: {
           return routeSession ? { type: "session", sessionID: routeSession } : { type: "home" };
         },
       },
+      ...(tabs !== undefined
+        ? {
+            tabs: {
+              enabled(): boolean {
+                return true;
+              },
+              list(): TabListEntry[] {
+                return tabs ?? [];
+              },
+            },
+          }
+        : {}),
     },
     data: {
       listen(fn: (event: { details: FakeEvent }) => void): () => void {
@@ -84,19 +137,7 @@ function makeContext(input: {
           return input.defaultDirectory ? { directory: input.defaultDirectory } : undefined;
         },
       },
-      session: {
-        root(sessionID: string): string {
-          return roots[sessionID] ?? sessionID;
-        },
-        get(sessionID: string): { title?: string } | undefined {
-          return titles[sessionID] ? { title: titles[sessionID] } : undefined;
-        },
-        status(sessionID: string): "idle" | "running" {
-          // Default to running when unknown, matching V2 (an active session the
-          // TUI is displaying); tests set idle explicitly to model turn end.
-          return statuses[sessionID] ?? "running";
-        },
-      },
+      session: sessionApi,
     },
   };
 
@@ -117,6 +158,23 @@ function makeContext(input: {
     },
     setRoute(sessionID: string | undefined) {
       routeSession = sessionID;
+    },
+    setTabs(next: TabListEntry[]) {
+      tabs = [...next];
+    },
+    setPermissions(sessionID: string, list: unknown[] | undefined) {
+      if (list === undefined) {
+        delete permissions[sessionID];
+      } else {
+        permissions[sessionID] = list;
+      }
+    },
+    setForms(sessionID: string, list: unknown[] | undefined) {
+      if (list === undefined) {
+        delete forms[sessionID];
+      } else {
+        forms[sessionID] = list;
+      }
     },
     isUnsubscribed: () => unsubscribed,
   };
@@ -641,6 +699,228 @@ test("tui plugin follows a session switch in the same pane", async () => {
 
     const state = readOnlyStateFile(stateDir);
     assert.equal(state.sessionId, "ses_second", "pane must follow the route to the new session");
+    assert.equal(state.status, "running");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+// --- Session tabs (V2 tabs.enabled) ---------------------------------------
+
+test("tui plugin rolls up a background-tab permission prompt", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    // Focused tab ses_a (route). Background tab ses_b has a pending permission.
+    const { context, emit } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      statuses: { ses_a: "running", ses_b: "running" },
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: false, attention: true },
+      ],
+      families: { ses_b: ["ses_b"] },
+      permissions: { ses_b: [{ id: "req-b" }] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    // A focused-tab event triggers persist and refreshes the tab snapshot.
+    emit({ type: "session.step.streamed", data: { sessionID: "ses_a", part: {} } });
+
+    const state = readOnlyStateFile(stateDir) as Record<string, unknown>;
+    const tabs = state.tabs as Array<Record<string, unknown>>;
+    assert.equal(tabs.length, 2);
+    const bTab = tabs.find((t) => t.sessionId === "ses_b");
+    assert.equal(bTab?.status, "waiting-input", "background permission must derive waiting-input");
+    // Top-level identity stays the focused tab.
+    assert.equal(state.sessionId, "ses_a");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin persists on a background-tab event it does not own", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    const { context, emit, setPermissions, setTabs } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      statuses: { ses_a: "running", ses_b: "running" },
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: true, attention: false },
+      ],
+      families: { ses_b: ["ses_b"] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    // ses_b asks for permission: mark its store + tab, then emit ses_b's event.
+    setPermissions("ses_b", [{ id: "req-b" }]);
+    setTabs([
+      { sessionID: "ses_a", active: true, busy: true, attention: false },
+      { sessionID: "ses_b", active: false, busy: false, attention: true },
+    ]);
+    emit({ type: "permission.asked", data: { id: "req-b", sessionID: "ses_b" } });
+
+    const state = readOnlyStateFile(stateDir) as Record<string, unknown>;
+    const tabs = state.tabs as Array<Record<string, unknown>>;
+    const bTab = tabs.find((t) => t.sessionId === "ses_b");
+    assert.equal(bTab?.status, "waiting-input", "background event must refresh the roll-up");
+    // The background event must not steal the top-level identity.
+    assert.equal(state.sessionId, "ses_a");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin derives waiting-question from a background-tab form", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    const { context, emit } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: false, attention: true },
+      ],
+      families: { ses_b: ["ses_b"] },
+      forms: { ses_b: [{ id: "frm-b" }] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    emit({ type: "session.step.streamed", data: { sessionID: "ses_a", part: {} } });
+
+    const tabs = (readOnlyStateFile(stateDir) as Record<string, unknown>).tabs as Array<
+      Record<string, unknown>
+    >;
+    const bTab = tabs.find((t) => t.sessionId === "ses_b");
+    assert.equal(bTab?.status, "waiting-question", "a pending form must derive waiting-question");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin resolves attention via family when the tab has no direct prompt", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    // The tab session ses_b has a subagent ses_b_child holding the permission.
+    const { context, emit } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: false, attention: true },
+      ],
+      families: { ses_b: ["ses_b", "ses_b_child"] },
+      permissions: { ses_b_child: [{ id: "req-child" }] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    emit({ type: "session.step.streamed", data: { sessionID: "ses_a", part: {} } });
+
+    const tabs = (readOnlyStateFile(stateDir) as Record<string, unknown>).tabs as Array<
+      Record<string, unknown>
+    >;
+    const bTab = tabs.find((t) => t.sessionId === "ses_b");
+    assert.equal(bTab?.status, "waiting-input", "family member's prompt must surface on the tab");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin does not filter a cross-directory (scope global) tab", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    const { context, emit } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: false, attention: true },
+      ],
+      families: { ses_b: ["ses_b"] },
+      permissions: { ses_b: [{ id: "req-b" }] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    // ses_b's event declares a *different* directory (scope: global tab). With
+    // tabs enabled the location guard must not drop it.
+    emit({
+      type: "permission.asked",
+      data: { id: "req-b", sessionID: "ses_b" },
+      location: { directory: "/tmp/other" },
+    });
+
+    const tabs = (readOnlyStateFile(stateDir) as Record<string, unknown>).tabs as Array<
+      Record<string, unknown>
+    >;
+    const bTab = tabs.find((t) => t.sessionId === "ses_b");
+    assert.equal(bTab?.status, "waiting-input", "a global-scope tab must not be location-filtered");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin drops a closed tab from the roll-up on the next event", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    const { context, emit, setTabs } = makeContext({
+      directory: "/tmp/project",
+      routeSession: "ses_a",
+      tabs: [
+        { sessionID: "ses_a", active: true, busy: true, attention: false },
+        { sessionID: "ses_b", active: false, busy: false, attention: true },
+      ],
+      families: { ses_b: ["ses_b"] },
+      permissions: { ses_b: [{ id: "req-b" }] },
+    });
+    const cleanup = mod.default.setup(context);
+
+    emit({ type: "session.step.streamed", data: { sessionID: "ses_a", part: {} } });
+    let tabs = (readOnlyStateFile(stateDir) as Record<string, unknown>).tabs as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(tabs.length, 2);
+
+    // ses_b tab closes; the next event must rebuild the snapshot without it.
+    setTabs([{ sessionID: "ses_a", active: true, busy: true, attention: false }]);
+    emit({ type: "session.step.streamed", data: { sessionID: "ses_a", part: {} } });
+
+    tabs = (readOnlyStateFile(stateDir) as Record<string, unknown>).tabs as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(tabs.length, 1, "a closed tab must drop on the next event");
+    assert.equal(tabs[0]?.sessionId, "ses_a");
+    if (typeof cleanup === "function") await cleanup();
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tui plugin writes no tabs field when session tabs are disabled", async () => {
+  const { stateDir, restoreEnv } = isolatedStateDir();
+  try {
+    const mod = await loadTuiPlugin();
+    // No `tabs` input → the fake omits `ui.tabs` entirely (disabled path).
+    const { context, emit } = makeContext({ directory: "/tmp/project" });
+    const cleanup = mod.default.setup(context);
+
+    emit({ type: "session.status", data: { sessionID: "ses_a", status: { type: "busy" } } });
+
+    const state = readOnlyStateFile(stateDir) as Record<string, unknown>;
+    assert.equal(state.tabs, undefined, "disabled tabs must not add a tabs field");
     assert.equal(state.status, "running");
     if (typeof cleanup === "function") await cleanup();
   } finally {

@@ -386,15 +386,25 @@ install_opencode_plugin() {
 
 # Best-effort OpenCode major-version detection. Prints the major integer, or 0
 # when opencode is absent or unparseable (callers treat 0/1 as "install V1").
+#
+# Resolves the binary the same way the running OpenCode does: prefer the
+# standalone install at ~/.opencode/bin/opencode, since a stale npm/fnm
+# opencode earlier on the installer's PATH (which need not match the PATH of
+# the OpenCode that loads the plugin) would otherwise misreport the major and
+# install the wrong entrypoint.
 detect_opencode_major() {
-  local version_output major
+  local opencode_bin version_output major
 
-  if ! command -v opencode >/dev/null 2>&1; then
+  if [ -x "$HOME/.opencode/bin/opencode" ]; then
+    opencode_bin="$HOME/.opencode/bin/opencode"
+  elif command -v opencode >/dev/null 2>&1; then
+    opencode_bin="opencode"
+  else
     echo 0
     return
   fi
 
-  version_output="$(opencode --version 2>/dev/null | head -n 1)"
+  version_output="$("$opencode_bin" --version 2>/dev/null | head -n 1)"
   # Extract the first dotted-version token (e.g. "v2.0.8" or "1.18.31") and take
   # its leading major component.
   major="$(printf '%s\n' "$version_output" |

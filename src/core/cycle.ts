@@ -1,11 +1,12 @@
 // Priority ranking for the `cycle` command. Pure (no tmux/fs) so it is unit
 // testable in isolation.
 //
-// Ordering is seen-major: unseen panes come first, then already-seen panes, so
-// repeated presses reach every agent pane and wrap rather than stopping once the
-// unacknowledged ones are visited. Within each of those two groups, panes are
-// ordered by attention tier (highest first), then oldest `statusSince` first
-// (true FIFO — a long-waiting pane is never starved by newer arrivals):
+// Ordering is seen-major: unseen panes come first, then already-seen panes. The
+// `cycle` command then rings over the unseen panes first (highest-priority
+// first) and, once none remain unacknowledged, falls back to traversing the full
+// ranked list so every agent pane is still reachable. Within each seen group,
+// panes are ordered by attention tier (highest first), then oldest `statusSince`
+// first (true FIFO — a long-waiting pane is never starved by newer arrivals):
 //   0 waiting-question / waiting-input · 1 idle · 2 new · 3 running · 4 unknown
 //
 // "seen" means the pane was the active pane at some point since it entered its
@@ -19,7 +20,7 @@
 import type { CycleLedger } from "./cycle-ledger.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus } from "../types.ts";
 
-function getCycleTier(status: RuntimeStatus): number {
+export function getCycleTier(status: RuntimeStatus): number {
   switch (status) {
     case "waiting-question":
     case "waiting-input":
@@ -81,27 +82,45 @@ export function rankPanesForCycle(
  * Pick the next pane to jump to from a ranked queue, given the current pane.
  * Skips the current pane so a press always moves; returns the first ranked pane
  * when the current pane is not in the queue (e.g. focus is on a non-agent pane).
+ *
+ * Membership of the "unseen ring" uses the raw `ledger.seen` flag, NOT
+ * `getSeenRank`. They are deliberately different: `getSeenRank` exempts tier 0
+ * (waiting panes) from the seen demotion so a prompt always *sorts* above an
+ * unseen lower tier. Reusing that for ring membership would keep a waiting pane
+ * in the ring forever, so with a single pending prompt cycling would oscillate
+ * between it and one partner pane and never reach the rest. Using raw `seen`
+ * lets the ring drain: unseen panes are visited first (in ranked order), then
+ * once none remain the ring falls back to the full list. A waiting pane still
+ * gets priority once while unseen, then releases after a glance.
  */
 export function pickNextCyclePane(
   ranked: PaneRuntimeSummary[],
   currentTarget: PaneTarget | null,
+  ledger: CycleLedger,
 ): PaneRuntimeSummary | null {
   if (ranked.length === 0) {
     return null;
   }
 
+  // Prefer the unseen ring, but fall through to the full ranked list when it
+  // holds no pane other than the current one (otherwise cycle would go dead
+  // when you are sitting on the only unacknowledged pane).
+  const unseen = ranked.filter((entry) => !ledger.get(entry.pane.paneId)?.seen);
+  const hasOtherUnseen = unseen.some((entry) => entry.pane.target !== currentTarget);
+  const ring = hasOtherUnseen ? unseen : ranked;
+
   if (currentTarget === null) {
-    return ranked[0] ?? null;
+    return ring[0] ?? null;
   }
 
-  const currentIndex = ranked.findIndex((entry) => entry.pane.target === currentTarget);
+  const currentIndex = ring.findIndex((entry) => entry.pane.target === currentTarget);
   if (currentIndex === -1) {
-    return ranked[0] ?? null;
+    return ring[0] ?? null;
   }
 
-  if (ranked.length === 1) {
+  if (ring.length === 1) {
     return null;
   }
 
-  return ranked[(currentIndex + 1) % ranked.length] ?? null;
+  return ring[(currentIndex + 1) % ring.length] ?? null;
 }

@@ -214,14 +214,15 @@ state — so ordinary tmux navigation acknowledges panes too, not just cycling. 
 pane becomes **unseen** again when its state changes (for example, a running
 session goes idle, or an idle session starts waiting on a prompt).
 
-Unseen panes are offered before seen ones **within the same tier**, so among
-equally urgent panes the ones you have not looked at come first. Waiting panes
-are the exception: a glance does not answer a prompt, so a pane still waiting on
-you is never demoted for having been seen — it stays ahead of lower tiers
-regardless. Repeated presses therefore sweep the panes that need you, highest
-priority first, then continue through the rest, wrapping around indefinitely.
-Cycling never dead-ends: as long as there is more than one agent pane, `C-n`
-always moves.
+Unseen panes are offered before seen ones. Cycling first sweeps every pane you
+have not looked at — highest priority first, across tiers — so an unseen running
+pane comes before a seen idle one. Waiting panes get priority while unseen but
+are never trapped there: once you have glanced at every unseen pane, cycling
+falls back to traversing the full ranked list so every pane stays reachable.
+Waiting panes are the exception to the seen demotion in the _ordering_: a glance
+does not answer a prompt, so a still-waiting pane always sorts ahead of lower
+tiers. Cycling never dead-ends: as long as there is more than one agent pane,
+`C-n` always moves.
 
 Unseen idle panes are also marked in the [status line](#status-line) and in the
 menu and popup choosers with a distinct filled circle (and a blue color where
@@ -236,15 +237,16 @@ running — none looked at yet.
 - Press `C-n` → jumps to **A** (waiting outranks everything).
 - Press `C-n` → jumps to **B** (idle outranks running).
 - Press `C-n` → jumps to **C** (running is last).
-- Press `C-n` → wraps back to **A**: still waiting, so still first in line.
+- Press `C-n` → all three are now seen, so cycling falls back to the full ranked
+  list and wraps back to **A**: still waiting, so still first in line.
 
 Once you answer **A**'s prompt it leaves the waiting tier and, now seen, sinks
 behind anything you have not reviewed. But while it is still waiting, glancing at
 it does not push it down — a pane blocked on you stays ahead of an unseen idle or
 running pane, not behind it.
 
-If **C** later goes idle, it becomes unseen again and jumps ahead of the seen
-panes in its own tier and below on the next press.
+If **C** later goes idle, it becomes unseen again — so the next `C-n` jumps
+straight to it ahead of every seen pane, not just those in its own tier.
 
 The cycle key is configurable like the other bindings, and can be disabled with
 `off`:
@@ -263,6 +265,34 @@ This holds one small file per pane (the pane's last observed state, when it
 entered that state, and whether it has been seen). It is derived data and safe
 to delete — cycling simply starts from a clean slate, treating every pane as
 unseen again.
+
+## OpenCode session tabs
+
+OpenCode's V2 TUI can hold several sessions in one pane as tabs. Only the
+focused tab is visible, so a background tab blocked on a prompt would otherwise
+go unnoticed — no glyph change and no notification, exactly the case the
+indicator exists for.
+
+When a pane has tabs, its reported state is the **roll-up** across all of them:
+the pane shows the highest-attention state any tab is in. So a background tab
+waiting on a permission or question prompt makes the whole pane render waiting —
+it lights up in the [status line](#status-line), fires your notify command, and
+[cycling](#smart-cycling) treats it as top priority — even while the tab you are
+looking at sits idle. The focused tab still owns the pane's title and session
+identity; the roll-up only ever raises the reported attention, never lowers it,
+so a prompt on the focused tab is never masked by an idle background tab.
+
+`inspect` shows the per-tab breakdown for a multi-tab pane, with `*` marking the
+focused tab:
+
+```text
+Tabs
+    waiting-input  Weekly update  [ses_…]
+  * idle           Main task      [ses_…]
+```
+
+This is automatic and needs no configuration. Panes without tabs (and OpenCode
+V1) are unaffected — their state is reported exactly as before.
 
 ## Status line
 

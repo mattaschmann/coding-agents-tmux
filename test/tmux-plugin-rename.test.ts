@@ -92,6 +92,14 @@ exit 0
   chmodSync(opencodePath, 0o755);
 }
 
+// Fake the standalone install at $HOME/.opencode/bin/opencode, which detection
+// prefers over any opencode on PATH.
+function installFakeStandaloneOpencode(home: string, version: string): void {
+  const binDir = join(home, ".opencode", "bin");
+  mkdirSync(binDir, { recursive: true });
+  installFakeOpencode(binDir, version);
+}
+
 test("coding-agents-tmux.tmux reads renamed tmux options", async () => {
   const fakeTmux = installFakeTmux(`
 log_path='__LOG_PATH__'
@@ -240,6 +248,63 @@ exit 1
       join(process.cwd(), "plugin", "coding-agents-tmux.ts"),
     );
     assert.equal(existsSync(dirPluginPath), false, "v1 must not install the V2 directory");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("coding-agents-tmux.tmux prefers the standalone opencode over a stale PATH v1", async () => {
+  const fakeTmux = installFakeTmux(`
+log_path='__LOG_PATH__'
+option="\${!#}"
+
+case "$1" in
+show-option)
+  case "$option" in
+    @coding-agents-tmux-status)
+      printf 'off\n'
+      ;;
+  esac
+  exit 0
+  ;;
+bind-key|set-option|set-hook|refresh-client|display-message|unbind-key)
+  printf '%s\n' "$*" >> "$log_path"
+  exit 0
+  ;;
+esac
+
+printf 'unexpected args: %s\n' "$*" >&2
+exit 1
+`);
+  const home = mkdtempSync(join(tmpdir(), "coding-agents-tmux-home-"));
+  const configHome = join(home, ".config-home");
+  const piHome = join(home, ".pi-home");
+  installFakeNpm(fakeTmux.pathEntry);
+  // Stale npm/fnm v1 shadows PATH; the real standalone install is v2. Detection
+  // must resolve $HOME/.opencode/bin/opencode and install the V2 package.
+  installFakeOpencode(fakeTmux.pathEntry, "1.18.31");
+  installFakeStandaloneOpencode(home, "opencode v2.0.8");
+  const restoreEnv = setEnv({
+    HOME: home,
+    PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}`,
+    XDG_CONFIG_HOME: configHome,
+    PI_CODING_AGENT_DIR: piHome,
+  });
+
+  try {
+    const result = await runCommand([join(process.cwd(), "coding-agents-tmux.tmux")]);
+    const dirPluginPath = join(configHome, "opencode", "plugins", "coding-agents-tmux");
+    const loosePluginPath = join(configHome, "opencode", "plugins", "coding-agents-tmux.ts");
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stderrText.trim(), "");
+    assert.ok(existsSync(dirPluginPath), "standalone v2 must install the V2 directory package");
+    assert.equal(
+      existsSync(loosePluginPath),
+      false,
+      "a stale PATH v1 must not force the loose V1 file",
+    );
+    assert.equal(readlinkSync(dirPluginPath), join(process.cwd(), "plugin", "coding-agents-tmux"));
   } finally {
     restoreEnv();
   }

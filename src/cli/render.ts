@@ -198,6 +198,15 @@ export function renderInspectResult(result: InspectResult): string {
     lines.push("  Session: none");
   }
 
+  if (runtime.tabs && runtime.tabs.length > 0) {
+    lines.push("", "Tabs");
+    for (const tab of runtime.tabs) {
+      const marker = tab.active ? "* " : "  ";
+      const title = tab.title || "(untitled)";
+      lines.push(`  ${marker}${tab.status}  ${title}  [${tab.sessionId}]`);
+    }
+  }
+
   if (result.debug?.codex) {
     lines.push(
       "",

@@ -9,6 +9,7 @@ import {
   type CodexStateFile,
 } from "./codex.ts";
 import { capturePanePreview } from "./tmux.ts";
+import { getCycleTier } from "./cycle.ts";
 import { getEnvValue, getPreferredStateDir, getStateDirCandidates } from "../naming.ts";
 import {
   getBooleanCandidate,
@@ -20,6 +21,7 @@ import type {
   DiscoveredPane,
   InspectDebugInfo,
   PaneRuntimeSummary,
+  PaneTabInfo,
   RuntimeInfo,
   RuntimeProviderName,
   RuntimeProviderOptions,
@@ -96,6 +98,7 @@ interface PluginStateFile {
   title?: string;
   updatedAt?: number;
   version?: number;
+  tabs?: PaneTabInfo[];
 }
 
 interface PluginStateIndex {
@@ -279,6 +282,7 @@ function createRuntimeInfo(input: {
   heuristic: boolean;
   session: SessionMatch | null;
   detail: string;
+  tabs?: PaneTabInfo[];
 }): RuntimeInfo {
   return {
     activity: input.activity,
@@ -291,7 +295,23 @@ function createRuntimeInfo(input: {
     },
     session: input.session,
     detail: input.detail,
+    ...(input.tabs ? { tabs: input.tabs } : {}),
   };
+}
+
+// Highest-attention status across the tab roll-up and the focused-tab status.
+// The focused-tab `status` participates so the aggregate is monotonic: it can
+// only raise attention above the latched top-level value, never lower it, so a
+// background tab cannot mask a focused waiting prompt and vice versa. Ordering
+// is the shared cycle tier (0 = waiting, highest priority).
+function rollUpTabStatus(topLevel: RuntimeStatus, tabs: PaneTabInfo[]): RuntimeStatus {
+  let winner = topLevel;
+  for (const tab of tabs) {
+    if (getCycleTier(tab.status) < getCycleTier(winner)) {
+      winner = tab.status;
+    }
+  }
+  return winner;
 }
 
 function toPluginSessionMatch(state: PluginStateFile): SessionMatch | null {
@@ -455,10 +475,32 @@ function classifyPluginState(
     });
   }
 
-  const status = state.status ?? "unknown";
+  const focusedStatus = state.status ?? "unknown";
+  const tabs = state.tabs && state.tabs.length > 0 ? state.tabs : undefined;
+
+  if (!tabs) {
+    // No tab roll-up: unchanged from the pre-tabs path (byte-identical).
+    const status = focusedStatus;
+    const activity =
+      state.activity ??
+      (status === "idle" || status === "new" ? "idle" : status === "unknown" ? "unknown" : "busy");
+
+    return createRuntimeInfo({
+      activity,
+      status,
+      source,
+      strategy: heuristic ? "descendant-only" : "exact",
+      provider: "plugin",
+      heuristic,
+      session: toPluginSessionMatch(state),
+      detail: state.detail ?? "plugin state file",
+    });
+  }
+
+  // Aggregate across tabs plus the focused-tab status (monotonic roll-up).
+  const status = rollUpTabStatus(focusedStatus, tabs);
   const activity =
-    state.activity ??
-    (status === "idle" || status === "new" ? "idle" : status === "unknown" ? "unknown" : "busy");
+    status === "idle" || status === "new" ? "idle" : status === "unknown" ? "unknown" : "busy";
 
   return createRuntimeInfo({
     activity,
@@ -469,6 +511,7 @@ function classifyPluginState(
     heuristic,
     session: toPluginSessionMatch(state),
     detail: state.detail ?? "plugin state file",
+    tabs,
   });
 }
 
