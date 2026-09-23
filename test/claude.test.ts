@@ -672,3 +672,132 @@ exit 1
     restoreEmptyEnv();
   }
 });
+
+test("live preview keeps an idle screen with an echoed prompt, bullets, and a draft idle", async () => {
+  const fakeTmux = installFakeTmux(`
+if [ "$1" = "capture-pane" ]; then
+  printf '\\xe2\\x9d\\xaf ok, it now says "waiting" but it was idle\\n'
+  printf '\\n'
+  printf '  Checks:\\n'
+  printf '  - Tests: 225 pass\\n'
+  printf '  - Reload: status-interval is 5\\n'
+  printf '  - Wiring: status-cached is called with an age\\n'
+  printf '\\n'
+  printf '\\xe2\\x9c\\xbb Brewed for 1m 48s\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '\\xe2\\x9d\\xaf draft text\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '  -- INSERT -- plan mode on (shift+tab to cycle)\\n'
+  exit 0
+fi
+exit 1
+`);
+  const restoreEnv = setEnv({
+    PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}`,
+    CODING_AGENTS_TMUX_CLAUDE_STATE_DIR: mkdtempSync(
+      join(tmpdir(), "coding-agents-tmux-empty-claude-state-"),
+    ),
+  });
+
+  try {
+    const summaries = await attachRuntimeToPanes([
+      createDiscoveredClaudePane({
+        target: "work:1.0",
+        paneId: "%1",
+        currentPath: "/tmp/claude-project",
+      }),
+    ]);
+
+    assert.equal(summaries[0]?.runtime.status, "idle");
+    assert.equal(summaries[0]?.runtime.source, "claude-preview");
+  } finally {
+    restoreEnv();
+  }
+});
+
+async function classifyWithHookState(input: {
+  previewIsBusy: boolean;
+  sourceEventType: string;
+  status: "idle" | "running";
+  ageMs: number;
+}): Promise<string | undefined> {
+  const footer = input.previewIsBusy ? "esc to interrupt" : "auto mode on (shift+tab to cycle)";
+  const fakeTmux = installFakeTmux(`
+if [ "$1" = "capture-pane" ]; then
+  printf '\\xe2\\x9c\\xb3 Working\\xe2\\x80\\xa6\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '\\xe2\\x9d\\xaf \\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '  ${footer}\\n'
+  exit 0
+fi
+exit 1
+`);
+  const stateDir = createClaudeStateDir([
+    {
+      version: 1,
+      target: "work:1.0",
+      paneId: "%1",
+      directory: "/tmp/claude-project",
+      title: "Session",
+      status: input.status,
+      activity: input.status === "idle" ? "idle" : "busy",
+      sourceEventType: input.sourceEventType,
+      updatedAt: Date.now() - input.ageMs,
+    },
+  ]);
+  const restoreEnv = setEnv({
+    PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}`,
+    CODING_AGENTS_TMUX_CLAUDE_STATE_DIR: stateDir,
+  });
+
+  try {
+    const summaries = await attachRuntimeToPanes([
+      createDiscoveredClaudePane({
+        target: "work:1.0",
+        paneId: "%1",
+        currentPath: "/tmp/claude-project",
+      }),
+    ]);
+
+    return summaries[0]?.runtime.status;
+  } finally {
+    restoreEnv();
+  }
+}
+
+test("a fresh Stop hook wins over a preview that has not redrawn yet", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: true,
+      sourceEventType: "Stop",
+      status: "idle",
+      ageMs: 500,
+    }),
+    "idle",
+  );
+});
+
+test("a fresh UserPromptSubmit hook wins over an idle-looking preview", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: false,
+      sourceEventType: "UserPromptSubmit",
+      status: "running",
+      ageMs: 500,
+    }),
+    "running",
+  );
+});
+
+test("an old Stop hook no longer overrides the live preview", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: true,
+      sourceEventType: "Stop",
+      status: "idle",
+      ageMs: 10_000,
+    }),
+    "running",
+  );
+});

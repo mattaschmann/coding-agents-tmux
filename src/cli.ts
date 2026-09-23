@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
@@ -47,7 +47,7 @@ import {
   resolveTmuxClient,
   switchToPane,
 } from "./core/tmux.ts";
-import { PRIMARY_CLI_NAME } from "./naming.ts";
+import { getStatusCacheDir, PRIMARY_CLI_NAME } from "./naming.ts";
 import { runCommand, sleep } from "./runtime.ts";
 import type {
   InspectResult,
@@ -97,6 +97,7 @@ interface StatusOptions extends RuntimeProviderOptions, PaneFilterOptions {
   summary?: boolean;
   style?: "plain" | "tmux";
   tone?: boolean;
+  cacheVariant?: string;
 }
 
 interface TmuxConfigOptions extends RuntimeProviderOptions {
@@ -523,6 +524,10 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
   const client = options.client ? await resolveTmuxClient(options.client) : undefined;
   await switchToPane(next.pane, client);
   observePane(next.pane.paneId, next.runtime.status, true, now, next.pane.serverIdentity);
+
+  // Refresh the status line immediately so the indicators reflect the jump
+  // without waiting for tmux's next natural redraw tick.
+  await runCommand(["tmux", "refresh-client", "-S"]);
 }
 
 async function runPopupUiCommand(options: PopupUiOptions): Promise<void> {
@@ -838,15 +843,35 @@ async function runStatusCommand(options: StatusOptions): Promise<void> {
 
   const unseenIdlePaneIds = getUnseenIdlePaneIds(panes);
 
-  console.log(
-    buildStatusOutput(
-      panes,
-      options,
-      currentTarget
-        ? { currentTarget, tmuxAvailable, unseenIdlePaneIds }
-        : { tmuxAvailable: false, unseenIdlePaneIds },
-    ),
+  const rendered = buildStatusOutput(
+    panes,
+    options,
+    currentTarget
+      ? { currentTarget, tmuxAvailable, unseenIdlePaneIds }
+      : { tmuxAvailable: false, unseenIdlePaneIds },
   );
+
+  console.log(rendered);
+
+  // Write the fast-path cache so the next tmux redraw can read it in ~30ms
+  // instead of re-running this ~130ms process (see src/status-cache.ts).
+  if (options.cacheVariant) {
+    writeStatusCache(options.cacheVariant, `${rendered}\n`);
+  }
+}
+
+function writeStatusCache(variant: string, content: string): void {
+  // Best-effort: a cache write must never break the status render.
+  try {
+    const dir = getStatusCacheDir();
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${variant}.txt`);
+    const tempFile = `${file}.${process.pid}.tmp`;
+    writeFileSync(tempFile, content, "utf8");
+    renameSync(tempFile, file);
+  } catch {
+    // ignore
+  }
 }
 
 async function runNotifyCommand(): Promise<void> {
@@ -1240,6 +1265,10 @@ async function main(): Promise<void> {
     .option(
       "--server-map <value>",
       "Legacy V1 target map or typed V2 shared-server map (JSON or file path)",
+    )
+    .option(
+      "--cache-variant <name>",
+      "Write the render to the status cache under this variant name (for the fast-path reader)",
     )
     .action(runStatusCommand);
 
