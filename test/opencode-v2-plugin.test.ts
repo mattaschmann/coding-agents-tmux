@@ -544,6 +544,34 @@ test("periodic reconciliation republishes silently hydrated cache state", async 
   cleanup();
 });
 
+test("reconciliation skips the write when derived state is unchanged", async () => {
+  const fx = fixture();
+  const writes: PaneState[] = [];
+  const cleanup = await setupPanePlugin(fx.context, {
+    navigationPollMs: 1_000,
+    reconcileMs: 5,
+    paneId: null,
+    resolveTarget: () => null,
+    writeState: (state) => writes.push(structuredClone(state)),
+    scheduleTmuxRefresh: () => undefined,
+  });
+
+  // Let several reconcile ticks fire without any status/route/family change.
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const afterQuiet = writes.length;
+
+  // Steady state: only the initial derivation wrote; the reconcile loop no
+  // longer churns the file (stable mtime for status-cached / cycle recency).
+  assert.equal(afterQuiet, 1);
+
+  // A real change still writes.
+  fx.status.set("child-a", "idle");
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.ok(writes.length > afterQuiet);
+  assert.equal(writes.at(-1)?.status, "idle");
+  cleanup();
+});
+
 test("atomic writer leaves only the pane-specific state file", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "coding-agents-tmux-v2-state-"));
   const state = {
