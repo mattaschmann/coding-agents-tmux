@@ -249,28 +249,6 @@ export function writeStateAtomically(stateDir: string, state: PaneState): void {
   }
 }
 
-// Materially-equal when every field except the always-moving `updatedAt` /
-// `sourceEventType` matches. The 2s reconcile timer re-derives state on an
-// interval; when nothing changed, skipping the write keeps the state file's
-// mtime stable — which downstream readers depend on: the tmux `status-cached`
-// fast path gates on an mtime watermark (a perpetual rewrite = permanent cache
-// miss), and the cycle ledger's recency ordering keys off `updatedAt`.
-function statesEqual(a: PaneState, b: PaneState): boolean {
-  return (
-    a.paneId === b.paneId &&
-    a.target === b.target &&
-    a.sessionId === b.sessionId &&
-    a.selectedSessionId === b.selectedSessionId &&
-    a.directory === b.directory &&
-    a.title === b.title &&
-    a.activity === b.activity &&
-    a.status === b.status &&
-    a.detail === b.detail &&
-    a.familySessionIds.length === b.familySessionIds.length &&
-    a.familySessionIds.every((id, index) => id === b.familySessionIds[index])
-  );
-}
-
 function runTmuxCommand(args: string[]) {
   return spawnSync("tmux", args, {
     encoding: "utf8",
@@ -422,7 +400,6 @@ export async function setupPanePlugin(
   let disposed = false;
   let generation = 0;
   let lastSelectedSessionId: string | null = null;
-  let lastWrittenState: PaneState | null = null;
   let pendingNavigationSessionId: string | null | undefined;
   let navigationTimer: ReturnType<typeof setInterval> | null = null;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -462,13 +439,7 @@ export async function setupPanePlugin(
     const state = sessionID
       ? derivePaneState(context, sessionID, base)
       : deriveUnselectedState(context, base);
-    // Skip the write when only `updatedAt`/`sourceEventType` would change (the
-    // 2s reconcile re-derives on an interval): a stable mtime keeps the tmux
-    // `status-cached` fast path hitting and cycle recency ordering intact.
-    if (!lastWrittenState || !statesEqual(state, lastWrittenState)) {
-      writeState(state);
-      lastWrittenState = state;
-    }
+    writeState(state);
     for (const familySessionID of state.familySessionIds) {
       statusOverrides.delete(familySessionID);
     }
