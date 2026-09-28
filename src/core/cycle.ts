@@ -17,14 +17,16 @@
 // glancing at a pane blocked on a prompt discharges nothing — only replying
 // does — so a still-waiting pane must never sink below an unseen lower tier.
 
-import type { CycleLedger } from "./cycle-ledger.ts";
+import { type CycleLedger } from "./cycle-ledger.ts";
+import { isWaitingStatus } from "./status.ts";
 import type { PaneRuntimeSummary, PaneTarget, RuntimeStatus } from "../types.ts";
 
 function getCycleTier(status: RuntimeStatus): number {
+  if (isWaitingStatus(status)) {
+    return 0;
+  }
+
   switch (status) {
-    case "waiting-question":
-    case "waiting-input":
-      return 0;
     case "idle":
       return 1;
     case "new":

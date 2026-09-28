@@ -33,6 +33,7 @@ import {
 } from "./core/copilot.ts";
 import { observePane, readCycleLedger } from "./core/cycle-ledger.ts";
 import { pickNextCyclePane, rankPanesForCycle } from "./core/cycle.ts";
+import { isWaitingStatus } from "./core/status.ts";
 import { notifyIntegration } from "./core/notifications.ts";
 import { detectOpenCodeVersion } from "./core/opencode-generation.ts";
 import { installOpenCodeIntegration } from "./core/opencode-install.ts";
@@ -338,13 +339,14 @@ export function filterPaneSummaries(
       return false;
     }
 
-    if (options.waiting && !["waiting-question", "waiting-input"].includes(entry.runtime.status)) {
+    if (options.waiting && !isWaitingStatus(entry.runtime.status)) {
       return false;
     }
 
     if (
       options.busy &&
-      !["running", "waiting-question", "waiting-input"].includes(entry.runtime.status)
+      entry.runtime.status !== "running" &&
+      !isWaitingStatus(entry.runtime.status)
     ) {
       return false;
     }
@@ -516,12 +518,13 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
   const ranked = rankPanesForCycle(panes, ledger);
   const next = pickNextCyclePane(ranked, currentTarget, ledger);
 
+  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
+
   if (!next) {
     await displayTmuxMessage("coding-agents-tmux: no other agent pane to cycle to");
     return;
   }
 
-  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
   await switchToPane(next.pane, client);
   observePane(next.pane.paneId, next.runtime.status, true, now, next.pane.serverIdentity);
 
@@ -750,10 +753,7 @@ export function buildStatusOutput(
       const countStatus = (status: RuntimeStatus) =>
         panes.filter((entry) => entry.runtime.status === status).length;
       const busy = panes.filter((entry) => entry.runtime.activity === "busy").length;
-      const waiting = panes.filter(
-        (entry) =>
-          entry.runtime.status === "waiting-question" || entry.runtime.status === "waiting-input",
-      ).length;
+      const waiting = panes.filter((entry) => isWaitingStatus(entry.runtime.status)).length;
       return JSON.stringify(
         {
           mode: "summary",
