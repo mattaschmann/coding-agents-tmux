@@ -714,3 +714,90 @@ exit 1
     restoreEnv();
   }
 });
+
+async function classifyWithHookState(input: {
+  previewIsBusy: boolean;
+  sourceEventType: string;
+  status: "idle" | "running";
+  ageMs: number;
+}): Promise<string | undefined> {
+  const footer = input.previewIsBusy ? "esc to interrupt" : "auto mode on (shift+tab to cycle)";
+  const fakeTmux = installFakeTmux(`
+if [ "$1" = "capture-pane" ]; then
+  printf '\\xe2\\x9c\\xb3 Working\\xe2\\x80\\xa6\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '\\xe2\\x9d\\xaf \\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '  ${footer}\\n'
+  exit 0
+fi
+exit 1
+`);
+  const stateDir = createClaudeStateDir([
+    {
+      version: 1,
+      target: "work:1.0",
+      paneId: "%1",
+      directory: "/tmp/claude-project",
+      title: "Session",
+      status: input.status,
+      activity: input.status === "idle" ? "idle" : "busy",
+      sourceEventType: input.sourceEventType,
+      updatedAt: Date.now() - input.ageMs,
+    },
+  ]);
+  const restoreEnv = setEnv({
+    PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}`,
+    CODING_AGENTS_TMUX_CLAUDE_STATE_DIR: stateDir,
+  });
+
+  try {
+    const summaries = await attachRuntimeToPanes([
+      createDiscoveredClaudePane({
+        target: "work:1.0",
+        paneId: "%1",
+        currentPath: "/tmp/claude-project",
+      }),
+    ]);
+
+    return summaries[0]?.runtime.status;
+  } finally {
+    restoreEnv();
+  }
+}
+
+test("a fresh Stop hook wins over a preview that has not redrawn yet", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: true,
+      sourceEventType: "Stop",
+      status: "idle",
+      ageMs: 500,
+    }),
+    "idle",
+  );
+});
+
+test("a fresh UserPromptSubmit hook wins over an idle-looking preview", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: false,
+      sourceEventType: "UserPromptSubmit",
+      status: "running",
+      ageMs: 500,
+    }),
+    "running",
+  );
+});
+
+test("an old Stop hook no longer overrides the live preview", async () => {
+  assert.equal(
+    await classifyWithHookState({
+      previewIsBusy: true,
+      sourceEventType: "Stop",
+      status: "idle",
+      ageMs: 10_000,
+    }),
+    "running",
+  );
+});
