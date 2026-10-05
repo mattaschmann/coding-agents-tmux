@@ -34,6 +34,13 @@ export interface CycleLedgerEntry {
 
 export type CycleLedger = Map<string, CycleLedgerEntry>;
 
+// Ledger key for a session tab within a pane. The ledger is key-agnostic
+// (`toFileName` hex-encodes any string, `computeObservation` is pure), so a tab
+// tracks its own seen/statusSince independently of its host pane's pane-id key.
+export function tabLedgerKey(paneId: string, sessionId: string): string {
+  return `${paneId}:${sessionId}`;
+}
+
 function serverDirectory(serverIdentity: string): string {
   return `server-${createHash("sha256").update(serverIdentity).digest("hex")}`;
 }

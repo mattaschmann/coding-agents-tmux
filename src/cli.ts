@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
@@ -33,6 +33,7 @@ import {
 } from "./core/copilot.ts";
 import { observePane, readCycleLedger } from "./core/cycle-ledger.ts";
 import { pickNextCyclePane, rankPanesForCycle } from "./core/cycle.ts";
+import { isWaitingStatus } from "./core/status.ts";
 import { notifyIntegration } from "./core/notifications.ts";
 import { detectOpenCodeVersion } from "./core/opencode-generation.ts";
 import { installOpenCodeIntegration } from "./core/opencode-install.ts";
@@ -47,7 +48,7 @@ import {
   resolveTmuxClient,
   switchToPane,
 } from "./core/tmux.ts";
-import { PRIMARY_CLI_NAME } from "./naming.ts";
+import { getStatusCacheDir, PRIMARY_CLI_NAME } from "./naming.ts";
 import { runCommand, sleep } from "./runtime.ts";
 import type {
   InspectResult,
@@ -97,6 +98,7 @@ interface StatusOptions extends RuntimeProviderOptions, PaneFilterOptions {
   summary?: boolean;
   style?: "plain" | "tmux";
   tone?: boolean;
+  cacheVariant?: string;
 }
 
 interface TmuxConfigOptions extends RuntimeProviderOptions {
@@ -337,13 +339,14 @@ export function filterPaneSummaries(
       return false;
     }
 
-    if (options.waiting && !["waiting-question", "waiting-input"].includes(entry.runtime.status)) {
+    if (options.waiting && !isWaitingStatus(entry.runtime.status)) {
       return false;
     }
 
     if (
       options.busy &&
-      !["running", "waiting-question", "waiting-input"].includes(entry.runtime.status)
+      entry.runtime.status !== "running" &&
+      !isWaitingStatus(entry.runtime.status)
     ) {
       return false;
     }
@@ -515,14 +518,19 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
   const ranked = rankPanesForCycle(panes, ledger);
   const next = pickNextCyclePane(ranked, currentTarget, ledger);
 
+  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
+
   if (!next) {
     await displayTmuxMessage("coding-agents-tmux: no other agent pane to cycle to");
     return;
   }
 
-  const client = options.client ? await resolveTmuxClient(options.client) : undefined;
   await switchToPane(next.pane, client);
   observePane(next.pane.paneId, next.runtime.status, true, now, next.pane.serverIdentity);
+
+  // Refresh the status line immediately so the indicators reflect the jump
+  // without waiting for tmux's next natural redraw tick.
+  await runCommand(["tmux", "refresh-client", "-S"]);
 }
 
 async function runPopupUiCommand(options: PopupUiOptions): Promise<void> {
@@ -745,10 +753,7 @@ export function buildStatusOutput(
       const countStatus = (status: RuntimeStatus) =>
         panes.filter((entry) => entry.runtime.status === status).length;
       const busy = panes.filter((entry) => entry.runtime.activity === "busy").length;
-      const waiting = panes.filter(
-        (entry) =>
-          entry.runtime.status === "waiting-question" || entry.runtime.status === "waiting-input",
-      ).length;
+      const waiting = panes.filter((entry) => isWaitingStatus(entry.runtime.status)).length;
       return JSON.stringify(
         {
           mode: "summary",
@@ -838,15 +843,35 @@ async function runStatusCommand(options: StatusOptions): Promise<void> {
 
   const unseenIdlePaneIds = getUnseenIdlePaneIds(panes);
 
-  console.log(
-    buildStatusOutput(
-      panes,
-      options,
-      currentTarget
-        ? { currentTarget, tmuxAvailable, unseenIdlePaneIds }
-        : { tmuxAvailable: false, unseenIdlePaneIds },
-    ),
+  const rendered = buildStatusOutput(
+    panes,
+    options,
+    currentTarget
+      ? { currentTarget, tmuxAvailable, unseenIdlePaneIds }
+      : { tmuxAvailable: false, unseenIdlePaneIds },
   );
+
+  console.log(rendered);
+
+  // Write the fast-path cache so the next tmux redraw can read it in ~30ms
+  // instead of re-running this ~130ms process (see src/status-cache.ts).
+  if (options.cacheVariant) {
+    writeStatusCache(options.cacheVariant, `${rendered}\n`);
+  }
+}
+
+function writeStatusCache(variant: string, content: string): void {
+  // Best-effort: a cache write must never break the status render.
+  try {
+    const dir = getStatusCacheDir();
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${variant}.txt`);
+    const tempFile = `${file}.${process.pid}.tmp`;
+    writeFileSync(tempFile, content, "utf8");
+    renameSync(tempFile, file);
+  } catch {
+    // ignore
+  }
 }
 
 async function runNotifyCommand(): Promise<void> {
@@ -1240,6 +1265,10 @@ async function main(): Promise<void> {
     .option(
       "--server-map <value>",
       "Legacy V1 target map or typed V2 shared-server map (JSON or file path)",
+    )
+    .option(
+      "--cache-variant <name>",
+      "Write the render to the status cache under this variant name (for the fast-path reader)",
     )
     .action(runStatusCommand);
 

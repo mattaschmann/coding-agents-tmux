@@ -545,9 +545,22 @@ main() {
     exit 0
   fi
 
+  local cli="$CURRENT_DIR/bin/coding-agents-tmux"
+  local status_env="CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown'"
   switch_command="'$popup_script' --provider '$provider'"
   waiting_switch_command="'$popup_script' --provider '$provider' --waiting"
-  status_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown' '$CURRENT_DIR/bin/coding-agents-tmux' status --style '$status_style' --provider '$provider'"
+  # The status render tries the fast cache reader first (~30ms, under tmux's
+  # ~100ms #() budget); on a cache miss it falls back to a full render that
+  # repopulates the cache. 'main' keys this render variant.
+  # With a status interval set, expire the cache every tick so preview-only
+  # changes (e.g. Esc → idle, which fires no hook) get re-rendered. The limit
+  # sits half a second under the interval: the previous tick's render is written
+  # ~0.1s after that tick, so a limit equal to the interval would keep serving it.
+  local cache_max_age=''
+  if [ "$status_interval" -gt 0 ] 2>/dev/null; then
+    cache_max_age=" '$((status_interval * 1000 - 500))'"
+  fi
+  status_command="{ '$cli' status-cached 'main'$cache_max_age || { cd '$CURRENT_DIR' && $status_env '$cli' status --style '$status_style' --provider '$provider' --cache-variant 'main'; }; }"
   status_text_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_SHOW_PREFIX='off' '$CURRENT_DIR/bin/coding-agents-tmux' status --style 'plain' --provider '$provider'"
   status_inline_command="cd '$CURRENT_DIR' && CODING_AGENTS_TMUX_STATUS_PREFIX='$status_prefix' CODING_AGENTS_TMUX_STATUS_SHOW_PREFIX='off' CODING_AGENTS_TMUX_STATUS_COLOR_NEUTRAL='$status_color_neutral' CODING_AGENTS_TMUX_STATUS_COLOR_BUSY='$status_color_busy' CODING_AGENTS_TMUX_STATUS_COLOR_WAITING='$status_color_waiting' CODING_AGENTS_TMUX_STATUS_COLOR_IDLE='$status_color_idle' CODING_AGENTS_TMUX_STATUS_COLOR_UNSEEN='$status_color_unseen' CODING_AGENTS_TMUX_STATUS_COLOR_UNKNOWN='$status_color_unknown' '$CURRENT_DIR/bin/coding-agents-tmux' status --style 'tmux' --provider '$provider'"
   status_tone_command="cd '$CURRENT_DIR' && '$CURRENT_DIR/bin/coding-agents-tmux' status --tone --provider '$provider'"
