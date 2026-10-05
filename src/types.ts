@@ -14,6 +14,7 @@ export interface TmuxPane {
   currentPath: string;
   isActive: boolean;
   tty: string;
+  panePid?: number;
   target: PaneTarget;
 }
 
