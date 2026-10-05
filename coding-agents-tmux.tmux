@@ -45,9 +45,13 @@ replace_status_placeholder() {
   existing="$(tmux show-option -gqv "$option_name")"
   updated="$existing"
 
+  # Bash <=4.2 (stock macOS) keeps quotes in a quoted replacement literally, so
+  # the replacement stays unquoted; bash 5.2 would then expand '&' in it.
+  shopt -u patsub_replacement 2>/dev/null || true
+
   for placeholder in "$@"; do
     if [[ "$updated" == *"$placeholder"* ]]; then
-      updated="${updated//$placeholder/$segment}"
+      updated="${updated//"$placeholder"/$segment}"
       replaced=0
     fi
   done
@@ -134,7 +138,7 @@ remove_status_segment() {
     return
   fi
 
-  updated="${existing//$segment/}"
+  updated="${existing//"$segment"/}"
   updated="$(printf '%s' "$updated" | tr -s ' ')"
   updated="${updated# }"
   updated="${updated% }"
