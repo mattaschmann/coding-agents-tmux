@@ -574,12 +574,12 @@ function getDirectoryFallbackClaudeState(
 // Claude's interactive prompts (permission requests, AskUserQuestion) render a
 // selectable list where the highlighted option is marked with an arrow glyph.
 // Requiring the arrow avoids misreading ordinary numbered prose in an assistant
-// message as a live prompt.
+// message as a live prompt. The arrow must sit on a numbered option: echoed
+// prompts and the input line also start with "❯", so a bare arrow would flag
+// every idle screen that has a bulleted answer above it.
 function hasInteractiveChoicePrompt(lines: string[]): boolean {
   const trimmed = lines.map((line) => line.trim());
-  const hasSelectionArrow = trimmed.some(
-    (line) => /^[❯›>]\s*\d+\.\s+\S/.test(line) || /^[❯›>]\s+\S/.test(line),
-  );
+  const hasSelectionArrow = trimmed.some((line) => /^[❯›>]\s*\d+\.\s+\S/.test(line));
 
   return hasSelectionArrow && countChoiceLines(lines.join("\n")) >= 2;
 }

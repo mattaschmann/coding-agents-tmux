@@ -672,3 +672,45 @@ exit 1
     restoreEmptyEnv();
   }
 });
+
+test("live preview keeps an idle screen with an echoed prompt, bullets, and a draft idle", async () => {
+  const fakeTmux = installFakeTmux(`
+if [ "$1" = "capture-pane" ]; then
+  printf '\\xe2\\x9d\\xaf ok, it now says "waiting" but it was idle\\n'
+  printf '\\n'
+  printf '  Checks:\\n'
+  printf '  - Tests: 225 pass\\n'
+  printf '  - Reload: status-interval is 5\\n'
+  printf '  - Wiring: status-cached is called with an age\\n'
+  printf '\\n'
+  printf '\\xe2\\x9c\\xbb Brewed for 1m 48s\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '\\xe2\\x9d\\xaf draft text\\n'
+  printf '\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\xe2\\x94\\x80\\n'
+  printf '  -- INSERT -- plan mode on (shift+tab to cycle)\\n'
+  exit 0
+fi
+exit 1
+`);
+  const restoreEnv = setEnv({
+    PATH: `${fakeTmux.pathEntry}:${process.env.PATH ?? ""}`,
+    CODING_AGENTS_TMUX_CLAUDE_STATE_DIR: mkdtempSync(
+      join(tmpdir(), "coding-agents-tmux-empty-claude-state-"),
+    ),
+  });
+
+  try {
+    const summaries = await attachRuntimeToPanes([
+      createDiscoveredClaudePane({
+        target: "work:1.0",
+        paneId: "%1",
+        currentPath: "/tmp/claude-project",
+      }),
+    ]);
+
+    assert.equal(summaries[0]?.runtime.status, "idle");
+    assert.equal(summaries[0]?.runtime.source, "claude-preview");
+  } finally {
+    restoreEnv();
+  }
+});
