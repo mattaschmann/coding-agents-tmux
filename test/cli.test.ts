@@ -372,7 +372,7 @@ test("buildStatusOutput renders current pane status inside tmux and falls back t
 
   assert.equal(
     buildStatusOutput(panes, {}, { tmuxAvailable: true, currentTarget: "work:1.2" }),
-    "󰚩 |  busy | ",
+    "󰚩 |  busy  | ",
   );
   assert.equal(
     buildStatusOutput(panes, { tone: true }, { tmuxAvailable: true, currentTarget: "work:1.9" }),
@@ -384,7 +384,40 @@ test("buildStatusOutput renders current pane status inside tmux and falls back t
   );
   assert.equal(jsonOutput.mode, "current");
   assert.equal(jsonOutput.current.pane.target, "work:1.1");
-  assert.match(jsonOutput.summary, /waiting/);
+  assert.deepEqual(
+    jsonOutput.windowPanes.map((entry: PaneRuntimeSummary) => entry.pane.target).sort(),
+    ["work:1.1", "work:1.2"],
+  );
+});
+
+test("buildStatusOutput shows sibling agent panes as icons when the focused pane isn't an agent", () => {
+  const siblingRunning = createSummary("running", {
+    pane: createPane({ target: "work:1.1", paneIndex: 1 }),
+  });
+  const siblingIdle = createSummary("idle", {
+    pane: createPane({ target: "work:1.2", paneIndex: 2 }),
+  });
+  const panes = [siblingRunning, siblingIdle];
+
+  assert.equal(
+    buildStatusOutput(panes, {}, { tmuxAvailable: true, currentTarget: "work:1.9" }),
+    "󰚩 |   | none",
+  );
+});
+
+test("buildStatusOutput lets a waiting sibling drive the tone when another pane is focused", () => {
+  const focused = createSummary("running", {
+    pane: createPane({ target: "work:1.2", paneIndex: 2 }),
+  });
+  const sibling = createSummary("waiting-question", {
+    pane: createPane({ target: "work:1.1", paneIndex: 1 }),
+  });
+  const panes = [focused, sibling];
+
+  assert.equal(
+    buildStatusOutput(panes, { tone: true }, { tmuxAvailable: true, currentTarget: "work:1.2" }),
+    "waiting",
+  );
 });
 
 test("buildStatusOutput uses a current placeholder when the active tmux pane has no opencode match", () => {
@@ -1000,7 +1033,7 @@ exit 1
       summary: "󰚩 |   ",
     });
     assert.equal(currentOutput.exitCode, 0);
-    assert.equal(currentOutput.stdoutText.trim(), "󰚩 |  waiting | ");
+    assert.equal(currentOutput.stdoutText.trim(), "󰚩 |  waiting  | ");
   } finally {
     restoreEnv();
   }

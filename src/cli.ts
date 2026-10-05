@@ -783,20 +783,21 @@ export function buildStatusOutput(
 
   const currentWindowKey = getWindowKeyFromTarget(currentTarget);
   const currentWindowPanes = panes.filter((entry) => getPaneWindowKey(entry) === currentWindowKey);
-  const current =
-    panes.find((entry) => entry.pane.target === currentTarget) ??
-    pickWindowStatusRepresentative(currentWindowPanes);
-  const scopedPanes = current
-    ? [current, ...panes.filter((entry) => getPaneWindowKey(entry) !== currentWindowKey)]
-    : panes;
+  const focused = panes.find((entry) => entry.pane.target === currentTarget) ?? null;
+  const representative = focused ?? pickWindowStatusRepresentative(currentWindowPanes);
+  const windowSiblings = currentWindowPanes.filter(
+    (entry) => entry.pane.paneId !== focused?.pane.paneId,
+  );
+  const otherWindowPanes = panes.filter((entry) => getPaneWindowKey(entry) !== currentWindowKey);
   const currentRenderOptions = {
     includeCurrentPlaceholder: true,
+    currentWindowPanes: windowSiblings,
     ...(options.style ? { style: options.style } : {}),
     ...(unseenIdlePaneIds ? { unseenIdlePaneIds } : {}),
   };
 
   if (options.tone) {
-    return renderStatusTone(current, scopedPanes);
+    return renderStatusTone(representative, panes);
   }
 
   if (options.json) {
@@ -804,15 +805,16 @@ export function buildStatusOutput(
       {
         mode: "current",
         target: currentTarget,
-        current,
-        summary: renderStatusSummary(current, scopedPanes, currentRenderOptions),
+        current: representative,
+        windowPanes: windowSiblings,
+        summary: renderStatusSummary(focused, otherWindowPanes, currentRenderOptions),
       },
       null,
       2,
     );
   }
 
-  return renderStatusSummary(current, scopedPanes, currentRenderOptions);
+  return renderStatusSummary(focused, otherWindowPanes, currentRenderOptions);
 }
 
 async function runStatusCommand(options: StatusOptions): Promise<void> {

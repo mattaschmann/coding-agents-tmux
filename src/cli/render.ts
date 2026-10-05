@@ -465,20 +465,17 @@ export function renderStatusTone(
   return "unknown";
 }
 
-function renderBackgroundSummary(
+function renderPaneSymbols(
   panes: PaneRuntimeSummary[],
   style: StatusStyle,
   unseenIdlePaneIds?: ReadonlySet<string>,
-): string[] {
-  if (panes.length === 0) {
-    return [formatStatusToken("none", "unknown", style)];
-  }
-
+): string {
   const separator = panes.length > 8 ? "" : " ";
   const orderedPanes = [...panes].sort((left, right) =>
     left.pane.target.localeCompare(right.pane.target),
   );
-  const summary = orderedPanes
+
+  return orderedPanes
     .map((entry) =>
       formatStatusToken(
         getPaneStatusSymbol(entry, unseenIdlePaneIds),
@@ -490,19 +487,42 @@ function renderBackgroundSummary(
       ),
     )
     .join(separator);
-
-  return [summary];
 }
 
-function renderCurrentSummary(current: PaneRuntimeSummary | null, style: StatusStyle): string[] {
-  if (!current) {
+function renderBackgroundSummary(
+  panes: PaneRuntimeSummary[],
+  style: StatusStyle,
+  unseenIdlePaneIds?: ReadonlySet<string>,
+): string[] {
+  if (panes.length === 0) {
     return [formatStatusToken("none", "unknown", style)];
+  }
+
+  return [renderPaneSymbols(panes, style, unseenIdlePaneIds)];
+}
+
+function renderCurrentSummary(
+  current: PaneRuntimeSummary | null,
+  windowPanes: PaneRuntimeSummary[],
+  style: StatusStyle,
+  unseenIdlePaneIds?: ReadonlySet<string>,
+): string[] {
+  const siblingSymbols =
+    windowPanes.length > 0 ? renderPaneSymbols(windowPanes, style, unseenIdlePaneIds) : "";
+
+  if (!current) {
+    if (siblingSymbols === "") {
+      return [formatStatusToken("none", "unknown", style)];
+    }
+
+    return [siblingSymbols];
   }
 
   const activityTone = getActivityTone(current);
   const label = `${getCurrentSymbol(current)} ${getPaneStatusLabel(current)}`;
+  const labelToken = formatStatusToken(label, activityTone, style);
 
-  return [formatStatusToken(label, activityTone, style)];
+  return siblingSymbols === "" ? [labelToken] : [`${labelToken} ${siblingSymbols}`];
 }
 
 export function renderStatusSummary(
@@ -510,6 +530,7 @@ export function renderStatusSummary(
   panes: PaneRuntimeSummary[],
   options: {
     includeCurrentPlaceholder?: boolean;
+    currentWindowPanes?: PaneRuntimeSummary[];
     style?: StatusStyle;
     unseenIdlePaneIds?: ReadonlySet<string>;
   } = {},
@@ -517,30 +538,17 @@ export function renderStatusSummary(
   const style = options.style ?? "plain";
   const unseen = options.unseenIdlePaneIds;
 
-  if (current) {
-    const backgroundPanes = panes.filter((entry) => entry.pane.target !== current.pane.target);
+  if (current || options.includeCurrentPlaceholder) {
+    const windowPanes = options.currentWindowPanes ?? [];
+    const windowPaneIds = new Set(windowPanes.map((entry) => entry.pane.paneId));
+    const backgroundPanes = panes.filter(
+      (entry) =>
+        entry.pane.target !== current?.pane.target && !windowPaneIds.has(entry.pane.paneId),
+    );
     const parts = [
-      ...renderCurrentSummary(current, style),
+      ...renderCurrentSummary(current, windowPanes, style, unseen),
       formatStatusToken("|", "neutral", style),
       ...renderBackgroundSummary(backgroundPanes, style, unseen),
-    ];
-
-    if (statusShowPrefix) {
-      return [
-        formatStatusToken(statusPrefix, "neutral", style),
-        formatStatusToken("|", "neutral", style),
-        ...parts,
-      ].join(" ");
-    }
-
-    return parts.join(" ");
-  }
-
-  if (options.includeCurrentPlaceholder) {
-    const parts = [
-      ...renderCurrentSummary(null, style),
-      formatStatusToken("|", "neutral", style),
-      ...renderBackgroundSummary(panes, style, unseen),
     ];
 
     if (statusShowPrefix) {

@@ -309,7 +309,7 @@ This means:
 - The second row means the focused pane is busy and more than eight background panes are shown in compact symbol mode.
 - The third row means the focused pane is newly started and there are no other detected coding-agent panes.
 
-If your active pane is not a detected coding-agent pane, the status line uses the strongest detected coding-agent pane in the current tmux window. Other panes are counted as background work.
+If your active pane is a detected coding-agent pane, the status line shows its label followed by an icon for each other agent pane in the same tmux window. If your active pane is not a detected coding-agent pane, every agent pane in the current window shows as an icon with no label. Either way, a waiting pane in the current window turns the accent color to the waiting color. Panes in other windows are counted as background work and never duplicated in the current-window section.
 
 Background pane symbols are shown in a stable target order:
 

@@ -244,6 +244,39 @@ test("renderStatusSummary includes current and background panes in stable order"
   );
 });
 
+test("renderStatusSummary places current-window sibling icons after the focused label", () => {
+  const focused = createSummary("running", {
+    pane: createPane({ target: "work:1.2", paneIndex: 2 }),
+  });
+  const sibling = createSummary("waiting-question", {
+    pane: createPane({ target: "work:1.1", paneIndex: 1 }),
+  });
+  const otherWindow = createSummary("idle", {
+    pane: createPane({ target: "work:2.0", windowIndex: 2, paneId: "%9" }),
+  });
+
+  assert.equal(
+    renderStatusSummary(focused, [otherWindow], { currentWindowPanes: [sibling] }),
+    "󰚩 |  busy  | ",
+  );
+
+  const idleSibling = createSummary("idle", {
+    pane: createPane({ target: "work:1.1", paneIndex: 1 }),
+  });
+  const unseenOutput = renderStatusSummary(focused, [], {
+    currentWindowPanes: [idleSibling],
+    style: "tmux",
+    unseenIdlePaneIds: new Set(["%2"]),
+  });
+
+  // Unseen idle siblings use the unseen glyph and color.
+  assert.match(unseenOutput, /#\[bold,fg=colour39\]/);
+  assert.equal(
+    unseenOutput,
+    "#[fg=colour252]󰚩#[default] #[fg=colour252]|#[default] #[fg=colour220] busy#[default] #[bold,fg=colour39]#[nobold]#[default] #[fg=colour252]|#[default] #[fg=colour244]none#[default]",
+  );
+});
+
 test("renderSwitchChoices shows numbered choices with truncated metadata", () => {
   const panes = [
     createSummary("waiting-question", {
