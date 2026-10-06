@@ -29,6 +29,9 @@ export interface CycleLedgerEntry {
   observedStatus: RuntimeStatus;
   statusSince: number;
   seen: boolean;
+  // Wall-clock time the pane was last looked at (active pane during an observe).
+  // Drives least-recently-seen ordering once every pane is seen. 0 = never.
+  lastSeenAt: number;
   version?: number;
 }
 
@@ -71,6 +74,7 @@ function readEntry(filePath: string): CycleLedgerEntry | null {
       observedStatus: parsed.observedStatus,
       statusSince: typeof parsed.statusSince === "number" ? parsed.statusSince : 0,
       seen: Boolean(parsed.seen),
+      lastSeenAt: typeof parsed.lastSeenAt === "number" ? parsed.lastSeenAt : 0,
       ...(typeof parsed.version === "number" ? { version: parsed.version } : {}),
     };
   } catch {
@@ -133,14 +137,32 @@ export function computeObservation(
   now: number,
 ): CycleLedgerEntry | null {
   if (!previous || previous.observedStatus !== status) {
-    return { observedStatus: status, statusSince: now, seen: isCurrent, version: LEDGER_VERSION };
+    return {
+      observedStatus: status,
+      statusSince: now,
+      seen: isCurrent,
+      lastSeenAt: isCurrent ? now : 0,
+      version: LEDGER_VERSION,
+    };
   }
 
+  // Same status, first sight by the active pane: acknowledge + stamp the LRU
+  // clock. Re-visits of an already-seen pane are stamped explicitly by the
+  // cycle command (see bumpLastSeen), not here, so the frequent status tick
+  // stays a no-op once a pane is seen.
   if (isCurrent && !previous.seen) {
-    return { ...previous, seen: true, version: LEDGER_VERSION };
+    return { ...previous, seen: true, lastSeenAt: now, version: LEDGER_VERSION };
   }
 
   return null;
+}
+
+/** Atomic write-temp-rename of a ledger entry (RMW-safe for overlapping short-lived procs). */
+function writeEntry(stateDir: string, filePath: string, entry: CycleLedgerEntry): void {
+  mkdirSync(stateDir, { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(entry, null, 2), "utf8");
+  renameSync(tempPath, filePath);
 }
 
 /** Record an observation for a pane, writing atomically only when something changed. */
@@ -160,8 +182,28 @@ export function observePane(
     return;
   }
 
-  mkdirSync(stateDir, { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tempPath, JSON.stringify(next, null, 2), "utf8");
-  renameSync(tempPath, filePath);
+  writeEntry(stateDir, filePath, next);
+}
+
+/**
+ * Re-stamp `lastSeenAt` for an already-tracked pane, moving it to the back of
+ * the least-recently-seen queue. Used by the cycle command on the panes it
+ * leaves and lands on so repeated presses rotate fairly instead of snapping
+ * back to one pane. No-op if the pane has no ledger entry yet (its first
+ * observation will stamp it).
+ */
+export function bumpLastSeen(
+  paneId: string,
+  now: number,
+  serverIdentity: string | null | undefined,
+): void {
+  if (!serverIdentity) return;
+  const stateDir = getCycleStateDir(serverIdentity);
+  const filePath = join(stateDir, toFileName(paneId));
+  const previous = readEntry(filePath);
+  if (!previous || previous.lastSeenAt === now) {
+    return;
+  }
+
+  writeEntry(stateDir, filePath, { ...previous, lastSeenAt: now, version: LEDGER_VERSION });
 }

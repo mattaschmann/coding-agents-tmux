@@ -31,7 +31,7 @@ import {
   installCopilotIntegration,
   persistCopilotHookState,
 } from "./core/copilot.ts";
-import { observePane, readCycleLedger } from "./core/cycle-ledger.ts";
+import { observePane, readCycleLedger, bumpLastSeen } from "./core/cycle-ledger.ts";
 import { pickNextCyclePane, rankPanesForCycle } from "./core/cycle.ts";
 import { isWaitingStatus } from "./core/status.ts";
 import { notifyIntegration } from "./core/notifications.ts";
@@ -514,6 +514,17 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
     );
   }
 
+  // Move the pane we're leaving to the back of the least-recently-seen queue
+  // before ranking, so the all-seen fallback picks a different pane instead of
+  // snapping back to this one. `observePane` only stamps `lastSeenAt` on first
+  // sight, so an already-seen current pane needs this explicit bump.
+  if (currentTarget !== null) {
+    const current = panes.find((entry) => entry.pane.target === currentTarget);
+    if (current) {
+      bumpLastSeen(current.pane.paneId, now, current.pane.serverIdentity);
+    }
+  }
+
   const ledger = readCycleLedger(panes[0]?.pane.serverIdentity);
   const ranked = rankPanesForCycle(panes, ledger);
   const next = pickNextCyclePane(ranked, currentTarget, ledger);
@@ -527,6 +538,8 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
 
   await switchToPane(next.pane, client);
   observePane(next.pane.paneId, next.runtime.status, true, now, next.pane.serverIdentity);
+  // Stamp the landed pane as most-recently-seen so the next press rotates onward.
+  bumpLastSeen(next.pane.paneId, now, next.pane.serverIdentity);
 
   // Refresh the status line immediately so the indicators reflect the jump
   // without waiting for tmux's next natural redraw tick.

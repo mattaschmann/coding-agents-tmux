@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { computeObservation, observePane, readCycleLedger } from "../src/core/cycle-ledger.ts";
-
+import {
+  bumpLastSeen,
+  computeObservation,
+  observePane,
+  readCycleLedger,
+} from "../src/core/cycle-ledger.ts";
 function withCycleStateDir<T>(fn: () => T): T {
   const dir = mkdtempSync(join(tmpdir(), "coding-agents-tmux-cycle-ledger-"));
   const previous = process.env.CODING_AGENTS_TMUX_CYCLE_STATE_DIR;
@@ -24,7 +28,7 @@ function withCycleStateDir<T>(fn: () => T): T {
 
 test("computeObservation resets statusSince and seen on a status change", () => {
   const next = computeObservation(
-    { observedStatus: "running", statusSince: 100, seen: true },
+    { observedStatus: "running", statusSince: 100, seen: true, lastSeenAt: 50 },
     "idle",
     false,
     500,
@@ -34,13 +38,36 @@ test("computeObservation resets statusSince and seen on a status change", () => 
     observedStatus: "idle",
     statusSince: 500,
     seen: false,
+    lastSeenAt: 0,
     version: 1,
   });
 });
 
+test("computeObservation stamps lastSeenAt when the current pane first sees a status", () => {
+  assert.equal(
+    computeObservation(
+      { observedStatus: "idle", statusSince: 100, seen: false, lastSeenAt: 0 },
+      "idle",
+      true,
+      500,
+    )?.lastSeenAt,
+    500,
+  );
+  // Status-change observed as the current pane also stamps it.
+  assert.equal(
+    computeObservation(
+      { observedStatus: "running", statusSince: 1, seen: true, lastSeenAt: 9 },
+      "idle",
+      true,
+      700,
+    )?.lastSeenAt,
+    700,
+  );
+});
+
 test("computeObservation marks seen when the current pane matches an unchanged status", () => {
   const next = computeObservation(
-    { observedStatus: "idle", statusSince: 100, seen: false },
+    { observedStatus: "idle", statusSince: 100, seen: false, lastSeenAt: 0 },
     "idle",
     true,
     500,
@@ -52,12 +79,17 @@ test("computeObservation marks seen when the current pane matches an unchanged s
 
 test("computeObservation returns null when nothing needs to change", () => {
   assert.equal(
-    computeObservation({ observedStatus: "idle", statusSince: 100, seen: true }, "idle", true, 500),
+    computeObservation(
+      { observedStatus: "idle", statusSince: 100, seen: true, lastSeenAt: 100 },
+      "idle",
+      true,
+      500,
+    ),
     null,
   );
   assert.equal(
     computeObservation(
-      { observedStatus: "idle", statusSince: 100, seen: false },
+      { observedStatus: "idle", statusSince: 100, seen: false, lastSeenAt: 0 },
       "idle",
       false,
       500,
@@ -101,6 +133,7 @@ test("independent servers and restarted lifetimes never inherit pane acknowledge
         observedStatus: "idle",
         statusSince: 2000,
         seen: false,
+        lastSeenAt: 0,
         version: 1,
       });
     }
@@ -136,5 +169,36 @@ test("legacy unscoped records and missing server identities are never trusted", 
     observePane("%0", "idle", false, 3000, "server-a");
     assert.equal(readCycleLedger("server-a").get("%0")?.seen, false);
     assert.equal(readCycleLedger("server-a").get("%0")?.statusSince, 3000);
+  });
+});
+
+test("observePane stamps lastSeenAt on first sight; a later re-sight no-ops the ledger", () => {
+  withCycleStateDir(() => {
+    observePane("%0", "idle", true, 1000, "server-a");
+    assert.equal(readCycleLedger("server-a").get("%0")?.lastSeenAt, 1000);
+    // Already-seen current pane: no further write, lastSeenAt frozen (bump is explicit).
+    observePane("%0", "idle", true, 2000, "server-a");
+    assert.equal(readCycleLedger("server-a").get("%0")?.lastSeenAt, 1000);
+  });
+});
+
+test("bumpLastSeen moves an already-seen pane to the back without touching status fields", () => {
+  withCycleStateDir(() => {
+    observePane("%0", "idle", true, 1000, "server-a");
+    bumpLastSeen("%0", 5000, "server-a");
+    const entry = readCycleLedger("server-a").get("%0");
+    assert.equal(entry?.lastSeenAt, 5000);
+    assert.equal(entry?.statusSince, 1000);
+    assert.equal(entry?.observedStatus, "idle");
+    assert.equal(entry?.seen, true);
+  });
+});
+
+test("bumpLastSeen is a no-op for an untracked pane or a missing server identity", () => {
+  withCycleStateDir(() => {
+    bumpLastSeen("%missing", 5000, "server-a");
+    assert.equal(readCycleLedger("server-a").size, 0);
+    bumpLastSeen("%0", 5000, null);
+    assert.equal(readCycleLedger("server-a").size, 0);
   });
 });

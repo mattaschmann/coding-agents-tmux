@@ -49,6 +49,7 @@ function ledgerOf(entries: Record<string, Partial<CycleLedgerEntry>>): CycleLedg
       observedStatus: entry.observedStatus ?? "idle",
       statusSince: entry.statusSince ?? 0,
       seen: entry.seen ?? false,
+      lastSeenAt: entry.lastSeenAt ?? 0,
     });
   }
   return ledger;
@@ -153,25 +154,31 @@ test("rankPanesForCycle plus pickNextCyclePane visits every pane once before rep
     createSummary("work:1.1", "%2", "idle"),
     createSummary("work:1.2", "%3", "running"),
   ];
+  // All seen with distinct look-at times; cycling is a least-recently-seen
+  // round-robin. Each visit re-stamps lastSeenAt and re-ranks (mirrors
+  // runCycleCommand) so every pane is reached before any repeats.
   const ledger = ledgerOf({
-    "%1": { observedStatus: "waiting-input", seen: true },
-    "%2": { observedStatus: "idle", seen: true },
-    "%3": { observedStatus: "running", seen: true },
+    "%1": { observedStatus: "waiting-input", seen: true, lastSeenAt: 10 },
+    "%2": { observedStatus: "idle", seen: true, lastSeenAt: 20 },
+    "%3": { observedStatus: "running", seen: true, lastSeenAt: 30 },
   });
 
-  const ranked = rankPanesForCycle(panes, ledger);
-  const order = ranked.map((entry) => entry.pane.target as PaneTarget);
   const visited: string[] = [];
-  let current = order[0] ?? null;
-
-  for (let step = 0; step < order.length; step += 1) {
+  let current: PaneTarget | null = "work:1.2"; // most-recently-seen pane
+  let clock = 100;
+  for (let step = 0; step < panes.length; step += 1) {
+    const ranked = rankPanesForCycle(panes, ledger);
     const next = pickNextCyclePane(ranked, current, ledger);
     assert.ok(next);
     visited.push(next.pane.paneId);
+    const prev = ledger.get(next.pane.paneId);
+    if (prev) {
+      ledger.set(next.pane.paneId, { ...prev, lastSeenAt: (clock += 1) });
+    }
     current = next.pane.target as PaneTarget;
   }
 
-  assert.deepEqual(new Set(visited).size, ranked.length);
+  assert.deepEqual(new Set(visited).size, panes.length);
 });
 
 test("pickNextCyclePane advances past the current pane and wraps around", () => {
@@ -237,24 +244,32 @@ test("pickNextCyclePane drains the unseen ring then falls through to the full ri
   const first = pickNextCyclePane(ranked, "work:1.0", ledger);
   assert.equal(first?.pane.paneId, "%unseenA");
 
-  ledger.set("%unseenA", { observedStatus: "idle", statusSince: 2, seen: true });
+  ledger.set("%unseenA", { observedStatus: "idle", statusSince: 2, seen: true, lastSeenAt: 0 });
   ranked = rankPanesForCycle(panes, ledger);
   const second = pickNextCyclePane(ranked, first?.pane.target ?? null, ledger);
   assert.equal(second?.pane.paneId, "%unseenB");
 
   // Once the last unseen pane is visited, the ring falls through to the full
-  // list so every pane stays reachable.
-  ledger.set("%unseenB", { observedStatus: "idle", statusSince: 3, seen: true });
-  ranked = rankPanesForCycle(panes, ledger);
+  // list so every pane stays reachable. Each visit re-stamps lastSeenAt and
+  // re-ranks (mirrors runCycleCommand), making the fallback a fair LRU rotation.
+  ledger.set("%unseenB", { observedStatus: "idle", statusSince: 3, seen: true, lastSeenAt: 20 });
+  ledger.set("%seen", { observedStatus: "idle", statusSince: 1, seen: true, lastSeenAt: 5 });
+  ledger.set("%unseenA", { observedStatus: "idle", statusSince: 2, seen: true, lastSeenAt: 10 });
   const visited = new Set<string>();
   let current: PaneTarget | null = (second?.pane.target as PaneTarget) ?? null;
-  for (let step = 0; step < ranked.length; step += 1) {
+  let clock = 100;
+  for (let step = 0; step < panes.length; step += 1) {
+    ranked = rankPanesForCycle(panes, ledger);
     const next = pickNextCyclePane(ranked, current, ledger);
     assert.ok(next);
     visited.add(next.pane.paneId);
+    const prev = ledger.get(next.pane.paneId);
+    if (prev) {
+      ledger.set(next.pane.paneId, { ...prev, lastSeenAt: (clock += 1) });
+    }
     current = next.pane.target as PaneTarget;
   }
-  assert.deepEqual(visited.size, ranked.length);
+  assert.deepEqual(visited.size, panes.length);
 });
 
 test("pickNextCyclePane with one pending prompt still reaches every pane (no oscillation)", () => {
@@ -268,21 +283,57 @@ test("pickNextCyclePane with one pending prompt still reaches every pane (no osc
     createSummary("work:1.2", "%idleB", "idle"),
   ];
   const ledger = ledgerOf({
-    "%prompt": { observedStatus: "waiting-input", statusSince: 1, seen: true },
-    "%idleA": { observedStatus: "idle", statusSince: 2, seen: true },
-    "%idleB": { observedStatus: "idle", statusSince: 3, seen: true },
+    "%prompt": { observedStatus: "waiting-input", statusSince: 1, seen: true, lastSeenAt: 5 },
+    "%idleA": { observedStatus: "idle", statusSince: 2, seen: true, lastSeenAt: 10 },
+    "%idleB": { observedStatus: "idle", statusSince: 3, seen: true, lastSeenAt: 15 },
   });
 
-  const ranked = rankPanesForCycle(panes, ledger);
   const visited = new Set<string>();
   let current: PaneTarget | null = "work:1.0";
-  for (let step = 0; step < ranked.length; step += 1) {
+  let clock = 100;
+  for (let step = 0; step < panes.length; step += 1) {
+    const ranked = rankPanesForCycle(panes, ledger);
     const next = pickNextCyclePane(ranked, current, ledger);
     assert.ok(next);
     visited.add(next.pane.paneId);
+    const prev = ledger.get(next.pane.paneId);
+    if (prev) {
+      ledger.set(next.pane.paneId, { ...prev, lastSeenAt: (clock += 1) });
+    }
     current = next.pane.target as PaneTarget;
   }
-  assert.deepEqual(visited.size, ranked.length);
+  assert.deepEqual(visited.size, panes.length);
+});
+
+test("pickNextCyclePane does not snap back to one pane once all are seen (LRU rotation)", () => {
+  // Reported bug: cycling off an idle pane onto a running pane kept jumping back
+  // to the same idle pane, starving same-tier siblings. With LRU, the pane just
+  // left is most-recently-seen so it sinks to the back; repeated presses reach
+  // every pane.
+  const panes = [
+    createSummary("work:1.0", "%idleA", "idle"),
+    createSummary("work:1.1", "%idleC", "idle"),
+    createSummary("work:1.2", "%running", "running"),
+  ];
+  const ledger = ledgerOf({
+    "%idleA": { observedStatus: "idle", statusSince: 1, seen: true, lastSeenAt: 10 },
+    "%idleC": { observedStatus: "idle", statusSince: 2, seen: true, lastSeenAt: 20 },
+    "%running": { observedStatus: "running", statusSince: 3, seen: true, lastSeenAt: 30 },
+  });
+
+  // Sitting on the running pane (most-recently-seen). Next press must reach the
+  // least-recently-seen pane (%idleA), not re-snap to it on every subsequent
+  // press.
+  let ranked = rankPanesForCycle(panes, ledger);
+  const first = pickNextCyclePane(ranked, "work:1.2", ledger);
+  assert.equal(first?.pane.paneId, "%idleA");
+
+  // Re-stamp %idleA as just-seen; the next press must advance to %idleC rather
+  // than returning to %idleA.
+  ledger.set("%idleA", { observedStatus: "idle", statusSince: 1, seen: true, lastSeenAt: 40 });
+  ranked = rankPanesForCycle(panes, ledger);
+  const second = pickNextCyclePane(ranked, "work:1.0", ledger);
+  assert.equal(second?.pane.paneId, "%idleC");
 });
 
 test("pickNextCyclePane falls through when the only unseen pane is the current one", () => {

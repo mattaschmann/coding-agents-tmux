@@ -218,9 +218,9 @@ Panes are ranked by attention tier, highest first:
 | 4    | running                                   | working; nothing for you to do |
 | 5    | unknown                                   | no reliable signal             |
 
-Within a tier, the pane that has been in its state **longest** comes first
-(true FIFO), so a session that has been waiting a while is never starved by
-newer arrivals.
+Within a tier, among panes you have not yet looked at, the pane that has been in
+its state **longest** comes first (true FIFO), so a session that has been waiting
+a while is never starved by newer arrivals.
 
 ### Seen vs. unseen
 
@@ -240,9 +240,10 @@ Unseen panes are offered before seen ones. Cycling first sweeps every pane you
 have not looked at — highest priority first, across tiers — so an unseen running
 pane comes before a seen idle one. Waiting panes lead this sweep while unseen;
 once visited, they give way to the remaining unseen panes even if their prompts
-are unanswered. When no other unseen pane remains, cycling traverses the full
-ranked list, with waiting panes first, so every pane stays reachable. Cycling
-never dead-ends: as long as there is more than one agent pane, `C-n` always moves.
+are unanswered. When no other unseen pane remains, cycling rotates through all
+panes in least-recently-looked-at order, regardless of tier, so repeated presses
+visit every pane in turn instead of snapping back to the same one. Cycling never
+dead-ends: as long as there is more than one agent pane, `C-n` always moves.
 
 Unseen idle panes are also marked in the [status line](#status-line) and in the
 menu and popup choosers with a distinct filled circle (and a blue color where
@@ -257,13 +258,16 @@ running — none looked at yet.
 - Press `C-n` → jumps to **A** (waiting outranks everything).
 - Press `C-n` → jumps to **B** (idle outranks running).
 - Press `C-n` → jumps to **C** (running is last).
-- Press `C-n` → all three are now seen, so cycling falls back to the full ranked
-  list and wraps back to **A**: still waiting, so still first in line.
+- Press `C-n` → all three are now seen, so cycling switches to a
+  least-recently-looked-at rotation and jumps to **A** (you looked at it longest
+  ago). Further presses continue to **B**, then **C**, then back to **A**.
 
 Looking at **A** does not answer its prompt, but lets the unseen sweep continue
-to **B** and **C**. If **A** is still waiting when the sweep finishes, it remains
-first in the full ranked list. Answering the prompt moves it out of the waiting
-tier.
+to **B** and **C**. Once every pane is seen, priority no longer applies: the
+rotation is purely least-recently-looked-at, so a still-waiting **A** no longer
+jumps the queue — it simply comes up again when it is the stalest pane. Answering
+its prompt (or any state change) makes the pane unseen again, restoring its
+priority on the next sweep.
 
 If **C** later goes idle, it becomes unseen again — so the next `C-n` jumps
 straight to it ahead of every seen pane, not just those in its own tier.
@@ -282,9 +286,9 @@ Cycling records what it has observed under:
 ```
 
 This holds one small file per pane (the pane's last observed state, when it
-entered that state, and whether it has been seen). It is derived data and safe
-to delete — cycling simply starts from a clean slate, treating every pane as
-unseen again.
+entered that state, whether it has been seen, and when it was last looked at).
+It is derived data and safe to delete — cycling simply starts from a clean
+slate, treating every pane as unseen again.
 
 ## Status line
 
