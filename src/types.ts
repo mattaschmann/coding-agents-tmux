@@ -64,6 +64,7 @@ export type RuntimeSource =
   | "claude-hook"
   | "claude-preview"
   | "claude-command"
+  | "kiro-hook"
   | "kiro-preview"
   | "kiro-command"
   | "copilot-hook"

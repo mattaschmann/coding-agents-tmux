@@ -340,6 +340,7 @@ exit 1
   const codexHome = join(home, ".codex-home");
   const claudeHome = join(home, ".claude-home");
   const copilotHome = join(home, ".copilot-home");
+  const kiroHome = join(home, ".kiro-home");
   installFakeNpm(fakeTmux.pathEntry);
   const restoreEnv = setEnv({
     HOME: home,
@@ -349,6 +350,7 @@ exit 1
     CODEX_HOME: codexHome,
     CLAUDE_HOME: claudeHome,
     COPILOT_HOME: copilotHome,
+    KIRO_HOME: kiroHome,
     AUTO_INSTALL_SELECTION: "pi,claude",
   });
 
@@ -359,11 +361,13 @@ exit 1
     const claudeSettingsPath = join(claudeHome, "settings.json");
     const copilotHooksPath = join(copilotHome, "hooks", "coding-agents-tmux.json");
     const codexHooksPath = join(codexHome, "hooks.json");
+    const kiroHooksPath = join(kiroHome, "hooks", "coding-agents-tmux.json");
 
     assert.equal(result.exitCode, 0);
     assert.equal(result.stderrText.trim(), "");
     assert.equal(existsSync(copilotHooksPath), false);
-    process.env.AUTO_INSTALL_SELECTION = "pi,claude,copilot";
+    assert.equal(existsSync(kiroHooksPath), false);
+    process.env.AUTO_INSTALL_SELECTION = "pi,claude,copilot,kiro";
     const optedIn = await runCommand([join(process.cwd(), "coding-agents-tmux.tmux")]);
     assert.equal(optedIn.exitCode, 0);
     assert.equal(optedIn.stderrText.trim(), "");
@@ -371,10 +375,13 @@ exit 1
     assert.ok(existsSync(newPiExtensionPath));
     assert.ok(existsSync(claudeSettingsPath));
     assert.ok(existsSync(copilotHooksPath));
+    assert.ok(existsSync(kiroHooksPath));
     assert.equal(existsSync(codexHooksPath), false);
     assert.match(readFileSync(claudeSettingsPath, "utf8"), /claude-hook-state/);
     assert.match(readFileSync(copilotHooksPath, "utf8"), /copilot-hook-state/);
+    assert.match(readFileSync(kiroHooksPath, "utf8"), /kiro-hook-state/);
     rmSync(copilotHooksPath);
+    rmSync(kiroHooksPath);
     process.env.AUTO_INSTALL_SELECTION = "auto";
     const all = await runCommand([join(process.cwd(), "coding-agents-tmux.tmux")]);
     assert.equal(all.exitCode, 0);

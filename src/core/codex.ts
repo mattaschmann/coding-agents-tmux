@@ -1,25 +1,24 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { getPreferredStateDir, getStateDirCandidates } from "../naming.ts";
-import { runCommand } from "../runtime.ts";
-import { notifyIntegration } from "./notifications.ts";
-import type { RuntimeInfo, RuntimeStatus } from "../types.ts";
+import {
+  buildManagedHookCommand,
+  mergeManagedHooks,
+  type ManagedHooksDocument,
+} from "./hook-install.ts";
+import {
+  persistHookState,
+  readHookStateFile,
+  type HookClassification,
+  type HookStateFile,
+  type StateDirConfig,
+} from "./hook-state.ts";
+import { countChoiceLines } from "./preview-text.ts";
+import type { RuntimeStatus } from "../types.ts";
 
-export interface CodexStateFile {
-  activity?: RuntimeInfo["activity"];
-  detail?: string;
-  directory?: string;
-  paneId?: string | null;
-  sessionId?: string;
-  sourceEventType?: string;
-  status?: RuntimeStatus;
-  target?: string | null;
-  title?: string;
-  updatedAt?: number;
-  version?: number;
-}
+export type CodexStateFile = HookStateFile;
 
 interface CodexHookPayload {
   cwd?: string;
@@ -29,20 +28,7 @@ interface CodexHookPayload {
   tool_name?: string;
 }
 
-interface CodexHookCommand {
-  command: string;
-  statusMessage?: string;
-  type: "command";
-}
-
-interface CodexHookMatcherGroup {
-  hooks: CodexHookCommand[];
-  matcher?: string;
-}
-
-interface CodexHooksDocument {
-  hooks?: Record<string, CodexHookMatcherGroup[]>;
-}
+type CodexHooksDocument = ManagedHooksDocument;
 
 export interface CodexInstallResult {
   configPath: string;
@@ -54,20 +40,15 @@ export interface CodexStateEntry {
   state: CodexStateFile;
 }
 
-function normalizeEnvValue(value: string | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
+const CODEX_STATUS_MESSAGE = "Updating Codex tmux state";
+const CODEX_SESSION_TITLE_FALLBACK = "Codex session";
+const CODEX_STATE_DIR: StateDirConfig = {
+  env: "CODING_AGENTS_TMUX_CODEX_STATE_DIR",
+  subdirectory: "codex-state",
+};
 
 export function getCodexStateDir(): string {
-  return getPreferredStateDir({
-    env: "CODING_AGENTS_TMUX_CODEX_STATE_DIR",
-    subdirectory: "codex-state",
-  });
+  return getPreferredStateDir(CODEX_STATE_DIR);
 }
 
 export function getCodexHome(): string {
@@ -80,68 +61,6 @@ export function getCodexConfigPath(): string {
 
 export function getCodexHooksPath(): string {
   return join(getCodexHome(), "hooks.json");
-}
-
-function toFileName(input: { directory: string; paneId: string | null }): string {
-  if (input.paneId) {
-    return `pane-${Buffer.from(input.paneId).toString("hex")}.json`;
-  }
-
-  return `cwd-${Buffer.from(input.directory).toString("hex")}.json`;
-}
-
-async function resolveTmuxPaneTarget(paneId: string | null): Promise<string | null> {
-  if (!paneId) {
-    return null;
-  }
-
-  try {
-    const { exitCode, stdoutText } = await runCommand([
-      "tmux",
-      "display-message",
-      "-p",
-      "-t",
-      paneId,
-      "#{session_name}:#{window_index}.#{pane_index}",
-    ]);
-
-    if (exitCode !== 0) {
-      return null;
-    }
-
-    const target = stdoutText.trim();
-    return target ? target : null;
-  } catch {
-    return null;
-  }
-}
-
-function getCodexSessionTitle(directory: string, existing: CodexStateFile | null): string {
-  if (existing?.title) {
-    return existing.title;
-  }
-
-  const name = basename(directory);
-  return name ? name : "Codex session";
-}
-
-function readStateFile(filePath: string): CodexStateFile | null {
-  if (!existsSync(filePath)) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(readFileSync(filePath, "utf8")) as CodexStateFile;
-  } catch {
-    return null;
-  }
-}
-
-function countChoiceLines(message: string): number {
-  return message
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^\d+\.\s+\S/.test(line) || /^[-*]\s+\S/.test(line)).length;
 }
 
 function classifyWaitingMessage(message: string | null | undefined): RuntimeStatus | null {
@@ -191,12 +110,7 @@ function classifyWaitingMessage(message: string | null | undefined): RuntimeStat
   return null;
 }
 
-function classifyHookPayload(payload: CodexHookPayload): {
-  activity: RuntimeInfo["activity"];
-  detail: string;
-  sourceEventType: string;
-  status: RuntimeStatus;
-} {
+function classifyHookPayload(payload: CodexHookPayload): HookClassification {
   const eventName = payload.hook_event_name ?? "unknown";
 
   switch (eventName) {
@@ -262,45 +176,23 @@ function classifyHookPayload(payload: CodexHookPayload): {
   }
 }
 
-export async function persistCodexHookState(rawInput: string): Promise<void> {
-  const payload = JSON.parse(rawInput) as CodexHookPayload;
-  const directory = payload.cwd?.trim() || process.cwd();
-  const paneId = normalizeEnvValue(process.env.TMUX_PANE);
-  const stateDir = getCodexStateDir();
-  const filePath = join(stateDir, toFileName({ directory, paneId }));
-  const existing = readStateFile(filePath);
-  const classified = classifyHookPayload(payload);
-  const sessionId = payload.session_id?.trim() || existing?.sessionId;
-  const nextState = {
-    version: 1,
-    paneId,
-    target: (await resolveTmuxPaneTarget(paneId)) ?? existing?.target ?? null,
-    directory,
-    title: getCodexSessionTitle(directory, existing),
-    activity: classified.activity,
-    status: classified.status,
-    detail: classified.detail,
-    updatedAt: Date.now(),
-    sourceEventType: classified.sourceEventType,
-    ...(sessionId ? { sessionId } : {}),
-  } satisfies CodexStateFile;
-
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(filePath, JSON.stringify(nextState, null, 2), "utf8");
-  await notifyIntegration();
+export function persistCodexHookState(rawInput: string): Promise<void> {
+  return persistHookState<CodexHookPayload>({
+    rawInput,
+    stateDir: CODEX_STATE_DIR,
+    classify: classifyHookPayload,
+    titleFallback: CODEX_SESSION_TITLE_FALLBACK,
+  });
 }
 
 export function readCodexStateEntries(): CodexStateEntry[] {
-  return getStateDirCandidates({
-    env: "CODING_AGENTS_TMUX_CODEX_STATE_DIR",
-    subdirectory: "codex-state",
-  })
+  return getStateDirCandidates(CODEX_STATE_DIR)
     .filter((stateDir) => existsSync(stateDir))
     .flatMap((stateDir) =>
       readdirSync(stateDir)
         .filter((entry) => entry.endsWith(".json"))
         .map((entry) => join(stateDir, entry))
-        .map((filePath) => ({ filePath, state: readStateFile(filePath) }))
+        .map((filePath) => ({ filePath, state: readHookStateFile(filePath) }))
         .filter((entry): entry is CodexStateEntry => Boolean(entry.state?.directory)),
     );
 }
@@ -309,16 +201,8 @@ export function readCodexStates(): CodexStateFile[] {
   return readCodexStateEntries().map((entry) => entry.state);
 }
 
-function buildManagedHook(command: string): CodexHookCommand {
-  return {
-    type: "command",
-    command,
-    statusMessage: "Updating Codex tmux state",
-  };
-}
-
 function buildManagedCodexHooks(command: string): CodexHooksDocument {
-  const hook = buildManagedHook(command);
+  const hook = buildManagedHookCommand(command, CODEX_STATUS_MESSAGE);
 
   return {
     hooks: {
@@ -330,12 +214,6 @@ function buildManagedCodexHooks(command: string): CodexHooksDocument {
       Stop: [{ hooks: [hook] }],
     },
   };
-}
-
-function isManagedHookGroup(group: CodexHookMatcherGroup): boolean {
-  return group.hooks.some(
-    (hook) => hook.type === "command" && hook.statusMessage === "Updating Codex tmux state",
-  );
 }
 
 export function updateCodexConfig(existing: string): string {
@@ -417,19 +295,7 @@ export function updateCodexConfig(existing: string): string {
 }
 
 export function updateCodexHooks(existing: string, command: string): string {
-  const parsed = existing.trim() ? (JSON.parse(existing) as CodexHooksDocument) : {};
-  const nextHooks = { ...parsed.hooks };
-  const managedHooks = buildManagedCodexHooks(command).hooks ?? {};
-
-  for (const [eventName, managedGroups] of Object.entries(managedHooks)) {
-    const groups = Array.isArray(nextHooks[eventName]) ? nextHooks[eventName] : [];
-    nextHooks[eventName] = [
-      ...groups.filter((group) => !isManagedHookGroup(group)),
-      ...managedGroups,
-    ];
-  }
-
-  return `${JSON.stringify({ ...parsed, hooks: nextHooks }, null, 2)}\n`;
+  return mergeManagedHooks(existing, buildManagedCodexHooks(command), CODEX_STATUS_MESSAGE);
 }
 
 export function installCodexIntegration(command: string): CodexInstallResult {

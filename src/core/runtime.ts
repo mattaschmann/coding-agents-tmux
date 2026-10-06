@@ -1,6 +1,6 @@
 import { getClaudeStateDir, attachRuntimeWithClaude } from "./claude.ts";
 import { getCodexStateDir } from "./codex.ts";
-import { attachRuntimeWithKiro } from "./kiro.ts";
+import { attachRuntimeWithKiro, getKiroStateDir } from "./kiro.ts";
 import {
   attachRuntimeWithCodex,
   attachRuntimeWithOpencodeProvider,
@@ -66,6 +66,12 @@ export function getRuntimeProviderHelpText(): string {
     "  Override with CODING_AGENTS_TMUX_CLAUDE_STATE_DIR.",
     `  Generate settings hooks with: ${PRIMARY_CLI_NAME} claude-hooks-template`,
     `  Install global Claude hooks with: ${PRIMARY_CLI_NAME} install-claude`,
+    "",
+    "Kiro CLI hook state (V3):",
+    `  Default path: ${getKiroStateDir()}`,
+    "  Override with CODING_AGENTS_TMUX_KIRO_STATE_DIR.",
+    `  Generate hooks with: ${PRIMARY_CLI_NAME} kiro-hooks-template`,
+    `  Install global Kiro hooks with: ${PRIMARY_CLI_NAME} install-kiro`,
     "",
     "Copilot CLI hook state (optional, CLI-local):",
     `  Default path: ${getCopilotStateDir()}`,

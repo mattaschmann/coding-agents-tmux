@@ -566,6 +566,34 @@ test("CLI install-claude writes Claude settings hooks", async () => {
   }
 });
 
+test("CLI install-kiro writes an owned Kiro hooks file", async () => {
+  const kiroHome = mkdtempSync(join(tmpdir(), "coding-agents-tmux-kiro-home-"));
+  const restoreEnv = setEnv({ KIRO_HOME: kiroHome });
+
+  try {
+    const result = await runCommand([BIN_PATH, "install-kiro"]);
+    const hooksPath = join(kiroHome, "hooks", "coding-agents-tmux.json");
+    const hooks = readFileSync(hooksPath, "utf8");
+
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stdoutText, /Updated .*coding-agents-tmux\.json/);
+    assert.match(hooks, /kiro-hook-state/);
+    assert.match(hooks, /SessionStart/);
+    assert.match(hooks, /SessionEnd/);
+    assert.match(hooks, /"version": "v1"/);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("CLI kiro-hooks-template prints a hooks document", async () => {
+  const result = await runCommand([BIN_PATH, "kiro-hooks-template"]);
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdoutText, /kiro-hook-state/);
+  assert.match(result.stdoutText, /"trigger": "Stop"/);
+});
+
 test("CLI inspect emits JSON for a discovered pane", async () => {
   const fakeTmux = installFakeTmux(`
 if [ "$1" = "list-panes" ]; then

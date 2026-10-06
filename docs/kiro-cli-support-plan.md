@@ -40,7 +40,7 @@ Kiro CLI does have a hook system, but Kiro hooks are configured inside named age
 - [x] Update CLI flags, filters, and help text
 - [x] Add tests
 - [x] Update README / user-facing docs
-- [ ] Optional future: revisit hook-backed Kiro state if there is a clean global or all-agents install story
+- [x] Hook-backed Kiro state (CLI V3): global `~/.kiro/hooks/` removes the per-agent-config blocker; implemented 2026-10-06
 
 ### Progress notes
 
@@ -51,6 +51,7 @@ Kiro CLI does have a hook system, but Kiro hooks are configured inside named age
 - 2026-06-05: Added Kiro tests and updated README with detection-only setup and fallback behavior.
 - 2026-06-05: Deferred hook-backed Kiro state because requiring a named Kiro agent is not desirable for the default UX.
 - 2026-06-05: Changed command-only Kiro panes to default to `idle` and added a lightweight pane-derived pseudo-session so list output does not show `(unmatched)` for successfully detected Kiro panes. The pseudo-session title prefers the current directory basename because Kiro does not appear to update tmux pane titles reliably.
+- 2026-10-06: Added Kiro CLI V3 support. Runtime state now reads the V3 TUI chrome (input/status bar → idle, `Kiro is working …`/`esc to cancel` → running, approval/menu overlay → waiting) instead of scanning reply text; V2 panes keep the earlier heuristics as a fallback. Added Claude-style hook-backed state: `install-kiro` writes an owned `~/.kiro/hooks/coding-agents-tmux.json`, with `kiro-hook-state`/`kiro-hooks-template` commands, a `kiro-state` dir, and `kiro` wired into `@coding-agents-tmux-auto-install`. Preview stays the source of truth (no hook fires for approval prompts). The earlier "hook-backed Kiro state deferred" decision is resolved: CLI V3 supports global `~/.kiro/hooks/` so no named agent is required. Shared `src/core/hook-state.ts` + `hook-install.ts` + `preview-text.ts` now back Claude, Codex, and Kiro.
 
 ## Detailed task list
 

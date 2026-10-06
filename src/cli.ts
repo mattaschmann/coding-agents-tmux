@@ -22,6 +22,11 @@ import {
   persistClaudeHookState,
 } from "./core/claude.ts";
 import {
+  buildKiroHooksTemplate,
+  installKiroIntegration,
+  persistKiroHookState,
+} from "./core/kiro.ts";
+import {
   buildCodexHooksTemplate,
   installCodexIntegration,
   persistCodexHookState,
@@ -673,18 +678,25 @@ async function runServerMapTemplateCommand(options: ServerMapTemplateOptions): P
   console.log(JSON.stringify(template, null, 2));
 }
 
+async function runHookStateCommand(
+  label: string,
+  persist: (rawInput: string) => Promise<void>,
+): Promise<void> {
+  const rawInput = await readStdinText();
+
+  if (!rawInput.trim()) {
+    throw new Error(`${label} requires a JSON payload on stdin`);
+  }
+
+  await persist(rawInput);
+}
+
 async function runCodexHooksTemplateCommand(): Promise<void> {
   console.log(buildCodexHooksTemplate(buildSelfCommand(["codex-hook-state"])));
 }
 
 async function runCodexHookStateCommand(): Promise<void> {
-  const rawInput = await readStdinText();
-
-  if (!rawInput.trim()) {
-    throw new Error("codex-hook-state requires a JSON payload on stdin");
-  }
-
-  await persistCodexHookState(rawInput);
+  await runHookStateCommand("codex-hook-state", persistCodexHookState);
 }
 
 async function runInstallCodexCommand(_options: InstallCodexOptions): Promise<void> {
@@ -700,13 +712,7 @@ async function runClaudeHooksTemplateCommand(): Promise<void> {
 }
 
 async function runClaudeHookStateCommand(): Promise<void> {
-  const rawInput = await readStdinText();
-
-  if (!rawInput.trim()) {
-    throw new Error("claude-hook-state requires a JSON payload on stdin");
-  }
-
-  await persistClaudeHookState(rawInput);
+  await runHookStateCommand("claude-hook-state", persistClaudeHookState);
 }
 
 async function runInstallClaudeCommand(_options: InstallClaudeOptions): Promise<void> {
@@ -714,6 +720,21 @@ async function runInstallClaudeCommand(_options: InstallClaudeOptions): Promise<
 
   console.log(`Updated ${result.settingsPath}`);
   console.log("Restart Claude Code sessions so new hooks are loaded");
+}
+
+async function runKiroHooksTemplateCommand(): Promise<void> {
+  console.log(buildKiroHooksTemplate(buildSelfCommand(["kiro-hook-state"])));
+}
+
+async function runKiroHookStateCommand(): Promise<void> {
+  await runHookStateCommand("kiro-hook-state", persistKiroHookState);
+}
+
+async function runInstallKiroCommand(): Promise<void> {
+  const result = installKiroIntegration(buildSelfCommand(["kiro-hook-state"]));
+
+  console.log(`Updated ${result.hooksPath}`);
+  console.log("Restart Kiro CLI sessions so new hooks are loaded");
 }
 
 async function runCopilotHookStateCommand(eventName: string): Promise<void> {
@@ -1166,6 +1187,21 @@ async function main(): Promise<void> {
     .command("install-claude")
     .description("Install or update Claude Code hook configuration under ~/.claude")
     .action(runInstallClaudeCommand);
+
+  program
+    .command("kiro-hooks-template")
+    .description("Print a Kiro CLI hooks template for higher-fidelity Kiro tmux state")
+    .action(runKiroHooksTemplateCommand);
+
+  program
+    .command("kiro-hook-state")
+    .description("Ingest one Kiro CLI hook payload from stdin and update local runtime state")
+    .action(runKiroHookStateCommand);
+
+  program
+    .command("install-kiro")
+    .description("Install or update Kiro CLI hook configuration under ~/.kiro/hooks")
+    .action(runInstallKiroCommand);
 
   program
     .command("copilot-hooks-template")

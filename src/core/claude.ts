@@ -1,41 +1,35 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
-import { notifyIntegration } from "./notifications.ts";
+import {
+  buildManagedHookCommand,
+  mergeManagedHooks,
+  type ManagedHooksDocument,
+} from "./hook-install.ts";
+import {
+  buildHookStateIndex,
+  getHookState,
+  isRecord,
+  mergeHookAndPreview,
+  persistHookState,
+  readHookStates,
+  DEFAULT_HOOK_TRANSITION_FRESHNESS_MS,
+  DEFAULT_HOOK_WAIT_FRESHNESS_MS,
+  DEFAULT_TRANSITION_EVENTS,
+  type HookClassification,
+  type HookMergeConfig,
+  type HookStateFile,
+  type HookStateIndex,
+  type PreviewClassification,
+  type StateDirConfig,
+} from "./hook-state.ts";
+import { countChoiceLines } from "./preview-text.ts";
 import { capturePanePreview } from "./tmux.ts";
-import { getPreferredStateDir, getStateDirCandidates } from "../naming.ts";
-import { runCommand } from "../runtime.ts";
-import type {
-  DiscoveredPane,
-  PaneRuntimeSummary,
-  RuntimeInfo,
-  RuntimeStatus,
-  SessionMatch,
-  TmuxPane,
-} from "../types.ts";
+import { getPreferredStateDir } from "../naming.ts";
+import type { DiscoveredPane, PaneRuntimeSummary, RuntimeStatus, TmuxPane } from "../types.ts";
 
-export interface ClaudeStateFile {
-  activity?: RuntimeInfo["activity"];
-  detail?: string;
-  directory?: string;
-  paneId?: string | null;
-  sessionId?: string;
-  sourceEventType?: string;
-  status?: RuntimeStatus;
-  target?: string | null;
-  title?: string;
-  transcriptPath?: string | null;
-  updatedAt?: number;
-  version?: number;
-}
+export type ClaudeStateFile = HookStateFile;
 
 interface ClaudeHookPayload {
   action?: string;
@@ -52,81 +46,19 @@ interface ClaudeHookPayload {
   transcript_path?: string;
 }
 
-interface ClaudeHookCommand {
-  command: string;
-  statusMessage?: string;
-  type: "command";
-}
-
-interface ClaudeHookMatcherGroup {
-  hooks: ClaudeHookCommand[];
-  matcher?: string;
-}
-
-interface ClaudeHooksDocument {
-  hooks?: Record<string, ClaudeHookMatcherGroup[]>;
-}
-
-interface ClaudeStateIndex {
-  exactPaneIdMatches: Map<string, ClaudeStateFile>;
-  exactTargetMatches: Map<string, ClaudeStateFile>;
-  statesByDirectory: Map<string, ClaudeStateFile[]>;
-}
+type ClaudeHooksDocument = ManagedHooksDocument;
+type ClaudeStateIndex = HookStateIndex;
 
 export interface ClaudeInstallResult {
   settingsPath: string;
 }
 
-function normalizeEnvValue(value: string | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function toFileName(input: { directory: string; paneId: string | null }): string {
-  if (input.paneId) {
-    return `pane-${Buffer.from(input.paneId).toString("hex")}.json`;
-  }
-
-  return `cwd-${Buffer.from(input.directory).toString("hex")}.json`;
-}
-
-async function resolveTmuxPaneTarget(paneId: string | null): Promise<string | null> {
-  if (!paneId) {
-    return null;
-  }
-
-  try {
-    const { exitCode, stdoutText } = await runCommand([
-      "tmux",
-      "display-message",
-      "-p",
-      "-t",
-      paneId,
-      "#{session_name}:#{window_index}.#{pane_index}",
-    ]);
-
-    if (exitCode !== 0) {
-      return null;
-    }
-
-    const target = stdoutText.trim();
-    return target ? target : null;
-  } catch {
-    return null;
-  }
-}
-
-function countChoiceLines(message: string): number {
-  return message
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^(?:[›>]\s*)?\d+\.\s+\S/.test(line) || /^(?:[›>]\s*)?[-*]\s+\S/.test(line))
-    .length;
-}
+const CLAUDE_STATUS_MESSAGE = "Updating Claude tmux state";
+const CLAUDE_SESSION_TITLE_FALLBACK = "Claude Code session";
+const CLAUDE_STATE_DIR: StateDirConfig = {
+  env: "CODING_AGENTS_TMUX_CLAUDE_STATE_DIR",
+  subdirectory: "claude-state",
+};
 
 function getClaudeHome(): string {
   return process.env.CLAUDE_HOME ?? join(homedir(), ".claude");
@@ -137,50 +69,7 @@ export function getClaudeSettingsPath(): string {
 }
 
 export function getClaudeStateDir(): string {
-  return getPreferredStateDir({
-    env: "CODING_AGENTS_TMUX_CLAUDE_STATE_DIR",
-    subdirectory: "claude-state",
-  });
-}
-
-function getClaudeStateUpdatedAt(state: ClaudeStateFile): number {
-  return state.updatedAt ?? 0;
-}
-
-function pickNewerClaudeState(
-  current: ClaudeStateFile | undefined,
-  candidate: ClaudeStateFile,
-): ClaudeStateFile {
-  if (!current || getClaudeStateUpdatedAt(candidate) > getClaudeStateUpdatedAt(current)) {
-    return candidate;
-  }
-
-  return current;
-}
-
-function getClaudeSessionTitle(directory: string, existing: ClaudeStateFile | null): string {
-  if (existing?.title) {
-    return existing.title;
-  }
-
-  const name = basename(directory);
-  return name ? name : "Claude Code session";
-}
-
-function readStateFile(filePath: string): ClaudeStateFile | null {
-  if (!existsSync(filePath)) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(readFileSync(filePath, "utf8")) as ClaudeStateFile;
-  } catch {
-    return null;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  return getPreferredStateDir(CLAUDE_STATE_DIR);
 }
 
 function schemaContainsChoiceOptions(value: unknown): boolean {
@@ -251,12 +140,7 @@ function classifyElicitation(payload: ClaudeHookPayload): {
   };
 }
 
-function classifyHookPayload(payload: ClaudeHookPayload): {
-  activity: RuntimeInfo["activity"];
-  detail: string;
-  sourceEventType: string;
-  status: RuntimeStatus;
-} {
+function classifyHookPayload(payload: ClaudeHookPayload): HookClassification {
   const eventName = payload.hook_event_name ?? "unknown";
 
   switch (eventName) {
@@ -366,209 +250,26 @@ function classifyHookPayload(payload: ClaudeHookPayload): {
   }
 }
 
-export async function persistClaudeHookState(rawInput: string): Promise<void> {
-  const payload = JSON.parse(rawInput) as ClaudeHookPayload;
-  const directory = payload.cwd?.trim() || process.cwd();
-  const paneId = normalizeEnvValue(process.env.TMUX_PANE);
-  const stateDir = getClaudeStateDir();
-  const filePath = join(stateDir, toFileName({ directory, paneId }));
-
-  if (payload.hook_event_name === "SessionEnd") {
-    if (!existsSync(filePath)) {
-      return;
-    }
-
-    unlinkSync(filePath);
-    await notifyIntegration();
-    return;
-  }
-
-  const existing = readStateFile(filePath);
-  const classified = classifyHookPayload(payload);
-  const sessionId = payload.session_id?.trim() || existing?.sessionId;
-  const transcriptPath = payload.transcript_path?.trim() || existing?.transcriptPath;
-  const nextState = {
-    version: 1,
-    paneId,
-    target: (await resolveTmuxPaneTarget(paneId)) ?? existing?.target ?? null,
-    directory,
-    title: getClaudeSessionTitle(directory, existing),
-    activity: classified.activity,
-    status: classified.status,
-    detail: classified.detail,
-    updatedAt: Date.now(),
-    sourceEventType: classified.sourceEventType,
-    ...(sessionId ? { sessionId } : {}),
-    ...(transcriptPath ? { transcriptPath } : {}),
-  } satisfies ClaudeStateFile;
-
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(filePath, JSON.stringify(nextState, null, 2), "utf8");
-  await notifyIntegration();
-}
-
-export function readClaudeStates(): ClaudeStateFile[] {
-  return getStateDirCandidates({
-    env: "CODING_AGENTS_TMUX_CLAUDE_STATE_DIR",
-    subdirectory: "claude-state",
-  })
-    .filter((stateDir) => existsSync(stateDir))
-    .flatMap((stateDir) =>
-      readdirSync(stateDir)
-        .filter((entry) => entry.endsWith(".json"))
-        .map((entry) => join(stateDir, entry))
-        .map((filePath) => readStateFile(filePath))
-        .filter((state): state is ClaudeStateFile => Boolean(state?.directory)),
-    );
-}
-
-function buildClaudeStateIndex(states = readClaudeStates()): ClaudeStateIndex {
-  const exactPaneIdMatches = new Map<string, ClaudeStateFile>();
-  const exactTargetMatches = new Map<string, ClaudeStateFile>();
-  const statesByDirectory = new Map<string, ClaudeStateFile[]>();
-
-  for (const state of states) {
-    const directory = state.directory;
-
-    if (!directory) {
-      continue;
-    }
-
-    const directoryStates = statesByDirectory.get(directory) ?? [];
-    directoryStates.push(state);
-    statesByDirectory.set(directory, directoryStates);
-
-    if (state.paneId) {
-      exactPaneIdMatches.set(
-        state.paneId,
-        pickNewerClaudeState(exactPaneIdMatches.get(state.paneId), state),
-      );
-    }
-
-    if (state.target) {
-      exactTargetMatches.set(
-        state.target,
-        pickNewerClaudeState(exactTargetMatches.get(state.target), state),
-      );
-    }
-  }
-
-  return {
-    exactPaneIdMatches,
-    exactTargetMatches,
-    statesByDirectory,
-  };
-}
-
-function createClaudeRuntimeInfo(input: {
-  activity: RuntimeInfo["activity"];
-  status: RuntimeStatus;
-  source: RuntimeInfo["source"];
-  strategy: RuntimeInfo["match"]["strategy"];
-  provider: RuntimeInfo["match"]["provider"];
-  heuristic: boolean;
-  session: SessionMatch | null;
-  detail: string;
-}): RuntimeInfo {
-  return {
-    activity: input.activity,
-    status: input.status,
-    source: input.source,
-    match: {
-      strategy: input.strategy,
-      provider: input.provider,
-      heuristic: input.heuristic,
+export function persistClaudeHookState(rawInput: string): Promise<void> {
+  return persistHookState<ClaudeHookPayload>({
+    rawInput,
+    stateDir: CLAUDE_STATE_DIR,
+    classify: classifyHookPayload,
+    titleFallback: CLAUDE_SESSION_TITLE_FALLBACK,
+    deleteOnEvents: ["SessionEnd"],
+    extraFields: (payload, existing) => {
+      const transcriptPath = payload.transcript_path?.trim() || existing?.transcriptPath;
+      return transcriptPath ? { transcriptPath } : {};
     },
-    session: input.session,
-    detail: input.detail,
-  };
-}
-
-function toClaudeSessionMatch(state: ClaudeStateFile): SessionMatch | null {
-  if (!state.directory || !state.title) {
-    return null;
-  }
-
-  return {
-    id: state.sessionId ?? `claude:${state.directory}`,
-    directory: state.directory,
-    title: state.title,
-    timeUpdated: state.updatedAt ?? Date.now(),
-  };
-}
-
-function classifyClaudeState(
-  state: ClaudeStateFile | null,
-  input: {
-    detail: string;
-    heuristic: boolean;
-    strategy: RuntimeInfo["match"]["strategy"];
-  },
-): RuntimeInfo {
-  if (!state?.directory) {
-    return createClaudeRuntimeInfo({
-      activity: "unknown",
-      status: "unknown",
-      source: "unmapped",
-      strategy: "unmapped",
-      provider: "none",
-      heuristic: false,
-      session: null,
-      detail: input.detail,
-    });
-  }
-
-  const status = state.status ?? "unknown";
-  const activity =
-    state.activity ??
-    (status === "idle" || status === "new" ? "idle" : status === "unknown" ? "unknown" : "busy");
-
-  return createClaudeRuntimeInfo({
-    activity,
-    status,
-    source: "claude-hook",
-    strategy: input.strategy,
-    provider: "claude",
-    heuristic: input.heuristic,
-    session: toClaudeSessionMatch(state),
-    detail: state.detail ?? input.detail,
   });
 }
 
-function matchesClaudeStateDirectory(
-  state: ClaudeStateFile | undefined,
-  pane: TmuxPane,
-): state is ClaudeStateFile {
-  return Boolean(state?.directory && state.directory === pane.currentPath);
+export function readClaudeStates(): ClaudeStateFile[] {
+  return readHookStates(CLAUDE_STATE_DIR);
 }
 
-function getExactClaudeState(index: ClaudeStateIndex, pane: TmuxPane): ClaudeStateFile | null {
-  const targetState = index.exactTargetMatches.get(pane.target);
-
-  if (matchesClaudeStateDirectory(targetState, pane)) {
-    return targetState;
-  }
-
-  const paneIdState = index.exactPaneIdMatches.get(pane.paneId);
-
-  if (matchesClaudeStateDirectory(paneIdState, pane)) {
-    return paneIdState;
-  }
-
-  return null;
-}
-
-function getDirectoryFallbackClaudeState(
-  index: ClaudeStateIndex,
-  pane: TmuxPane,
-): ClaudeStateFile | null {
-  const states = index.statesByDirectory.get(pane.currentPath) ?? [];
-
-  if (states.length !== 1) {
-    return null;
-  }
-
-  return states[0] ?? null;
+function buildClaudeStateIndex(states = readClaudeStates()): ClaudeStateIndex {
+  return buildHookStateIndex(states);
 }
 
 // Claude's interactive prompts (permission requests, AskUserQuestion) render a
@@ -674,9 +375,7 @@ function isInteractiveDialog(lower: string): boolean {
   );
 }
 
-function classifyClaudePreview(
-  lines: string[],
-): Pick<RuntimeInfo, "activity" | "detail" | "status"> | null {
+function classifyClaudePreview(lines: string[]): PreviewClassification | null {
   const nonEmptyLines = lines.map((line) => line.trim()).filter(Boolean);
 
   if (nonEmptyLines.length === 0) {
@@ -733,7 +432,7 @@ function classifyClaudePreview(
 
 async function loadClaudePreviewClassification(
   target: TmuxPane["target"],
-): Promise<Pick<RuntimeInfo, "activity" | "detail" | "status"> | null> {
+): Promise<PreviewClassification | null> {
   try {
     const lines = await capturePanePreview(target, 24);
     return classifyClaudePreview(lines);
@@ -742,16 +441,8 @@ async function loadClaudePreviewClassification(
   }
 }
 
-function buildManagedHook(command: string): ClaudeHookCommand {
-  return {
-    type: "command",
-    command,
-    statusMessage: "Updating Claude tmux state",
-  };
-}
-
 function buildManagedClaudeHooks(command: string): ClaudeHooksDocument {
-  const hook = buildManagedHook(command);
+  const hook = buildManagedHookCommand(command, CLAUDE_STATUS_MESSAGE);
 
   return {
     hooks: {
@@ -770,29 +461,8 @@ function buildManagedClaudeHooks(command: string): ClaudeHooksDocument {
   };
 }
 
-function isManagedHookGroup(group: ClaudeHookMatcherGroup): boolean {
-  return group.hooks.some(
-    (hook) => hook.type === "command" && hook.statusMessage === "Updating Claude tmux state",
-  );
-}
-
 export function updateClaudeSettings(existing: string, command: string): string {
-  const parsed = existing.trim() ? (JSON.parse(existing) as Record<string, unknown>) : {};
-  const parsedHooks = isRecord(parsed.hooks)
-    ? (parsed.hooks as Record<string, ClaudeHookMatcherGroup[]>)
-    : {};
-  const nextHooks = { ...parsedHooks };
-  const managedHooks = buildManagedClaudeHooks(command).hooks ?? {};
-
-  for (const [eventName, managedGroups] of Object.entries(managedHooks)) {
-    const groups = Array.isArray(nextHooks[eventName]) ? nextHooks[eventName] : [];
-    nextHooks[eventName] = [
-      ...groups.filter((group) => !isManagedHookGroup(group)),
-      ...managedGroups,
-    ];
-  }
-
-  return `${JSON.stringify({ ...parsed, hooks: nextHooks }, null, 2)}\n`;
+  return mergeManagedHooks(existing, buildManagedClaudeHooks(command), CLAUDE_STATUS_MESSAGE);
 }
 
 export function installClaudeIntegration(command: string): ClaudeInstallResult {
@@ -810,33 +480,25 @@ export function buildClaudeHooksTemplate(command: string): string {
   return `${JSON.stringify(buildManagedClaudeHooks(command), null, 2)}\n`;
 }
 
-// A hook state is only trusted to assert a blocking wait that the live preview
-// cannot see (e.g. an MCP elicitation form) for a short window. Beyond this the
-// pane preview is the sole source of truth, which prevents stale "waiting" or
-// "running" events from lingering after Claude has gone idle.
-const CLAUDE_HOOK_WAIT_FRESHNESS_MS = 60_000;
-
-// Right after UserPromptSubmit or Stop, the hook fires before Claude redraws, so
-// the pane preview still shows the previous turn ("esc to interrupt" lingering
-// at Stop, absent at submit). For a few seconds the hook is the better signal.
-const CLAUDE_HOOK_TRANSITION_FRESHNESS_MS = 3_000;
-const CLAUDE_TRANSITION_EVENTS = new Set(["UserPromptSubmit", "Stop"]);
-
-function isFreshClaudeTransition(state: ClaudeStateFile | null): state is ClaudeStateFile {
-  if (!state?.sourceEventType || !CLAUDE_TRANSITION_EVENTS.has(state.sourceEventType)) {
-    return false;
-  }
-
-  return Date.now() - (state.updatedAt ?? 0) < CLAUDE_HOOK_TRANSITION_FRESHNESS_MS;
-}
-
-function isFreshClaudeWait(state: ClaudeStateFile | null): state is ClaudeStateFile {
-  if (!state?.status?.startsWith("waiting")) {
-    return false;
-  }
-
-  return Date.now() - (state.updatedAt ?? 0) < CLAUDE_HOOK_WAIT_FRESHNESS_MS;
-}
+// The merge trusts a fresh hook state over the live preview only briefly: a
+// blocking wait the preview cannot see (e.g. an MCP elicitation form) for the
+// wait window, and a just-happened transition for the shorter transition window
+// before Claude redraws (e.g. "esc to interrupt" lingering at Stop). Beyond
+// that the pane preview is the sole source of truth, so stale "waiting"/
+// "running" events do not linger after Claude goes idle.
+const CLAUDE_MERGE_CONFIG: HookMergeConfig = {
+  provider: "claude",
+  idPrefix: "claude",
+  hookSource: "claude-hook",
+  previewSource: "claude-preview",
+  commandSource: "claude-command",
+  commandActivity: "busy",
+  commandStatus: "running",
+  commandDetail: (pane) => `detected ${pane.currentCommand} process in tmux pane`,
+  waitFreshnessMs: DEFAULT_HOOK_WAIT_FRESHNESS_MS,
+  transitionFreshnessMs: DEFAULT_HOOK_TRANSITION_FRESHNESS_MS,
+  transitionEvents: DEFAULT_TRANSITION_EVENTS,
+};
 
 export async function attachRuntimeWithClaude(
   panes: DiscoveredPane[],
@@ -844,84 +506,9 @@ export async function attachRuntimeWithClaude(
 ): Promise<PaneRuntimeSummary[]> {
   return Promise.all(
     panes.map(async (entry) => {
-      const hookState =
-        getExactClaudeState(index, entry.pane) ??
-        getDirectoryFallbackClaudeState(index, entry.pane);
-      const session = hookState ? toClaudeSessionMatch(hookState) : null;
+      const hookState = getHookState(index, entry.pane);
       const preview = await loadClaudePreviewClassification(entry.pane.target);
-
-      if (preview) {
-        // The preview reliably tells busy/idle/waiting apart in real time. When
-        // it reads idle but a fresh hook event says Claude is blocked on a
-        // structured prompt the preview can't render, honor the hook.
-        if (preview.status === "idle" && isFreshClaudeWait(hookState)) {
-          return {
-            ...entry,
-            runtime: classifyClaudeState(hookState, {
-              detail: "matched fresh Claude hook wait state",
-              heuristic: false,
-              strategy: "exact",
-            }),
-          };
-        }
-
-        if (preview.status !== "waiting-question" && isFreshClaudeTransition(hookState)) {
-          return {
-            ...entry,
-            runtime: classifyClaudeState(hookState, {
-              detail: "matched fresh Claude hook transition",
-              heuristic: false,
-              strategy: "exact",
-            }),
-          };
-        }
-
-        const detail =
-          preview.status === "waiting-question" && hookState?.detail?.includes("waiting")
-            ? hookState.detail
-            : preview.detail;
-
-        return {
-          ...entry,
-          runtime: createClaudeRuntimeInfo({
-            activity: preview.activity,
-            status: preview.status,
-            source: "claude-preview",
-            strategy: hookState ? "exact" : "unmapped",
-            provider: "claude",
-            heuristic: true,
-            session,
-            detail,
-          }),
-        };
-      }
-
-      // Preview unreadable (capture failed): fall back to hook state, then to
-      // process detection.
-      if (hookState) {
-        return {
-          ...entry,
-          runtime: classifyClaudeState(hookState, {
-            detail: "matched Claude hook state (preview unavailable)",
-            heuristic: true,
-            strategy: "exact",
-          }),
-        };
-      }
-
-      return {
-        ...entry,
-        runtime: createClaudeRuntimeInfo({
-          activity: "busy",
-          status: "running",
-          source: "claude-command",
-          strategy: "exact",
-          provider: "claude",
-          heuristic: false,
-          session: null,
-          detail: `detected ${entry.pane.currentCommand} process in tmux pane`,
-        }),
-      };
+      return mergeHookAndPreview(entry, hookState, preview, CLAUDE_MERGE_CONFIG);
     }),
   );
 }

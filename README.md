@@ -162,10 +162,10 @@ You can also control all tmux-managed installs together:
 ```tmux
 set -g @coding-agents-tmux-auto-install 'auto'
 set -g @coding-agents-tmux-auto-install 'off'
-set -g @coding-agents-tmux-auto-install 'opencode,pi,codex,claude,copilot'
+set -g @coding-agents-tmux-auto-install 'opencode,pi,codex,claude,kiro,copilot'
 ```
 
-The explicit `opencode,pi,codex,claude,copilot` list is the recommended README setting because it makes the intended managed installs obvious in your tmux config. When `@coding-agents-tmux-auto-install` is set, it takes precedence over the individual install toggles. Kiro CLI has no hook/extension installer; it uses pane and preview detection without an install step.
+The explicit `opencode,pi,codex,claude,kiro,copilot` list is the recommended README setting because it makes the intended managed installs obvious in your tmux config. When `@coding-agents-tmux-auto-install` is set, it takes precedence over the individual install toggles. Kiro CLI V3 ships a hook installer that writes `~/.kiro/hooks/coding-agents-tmux.json`; Kiro V2 and panes without hooks fall back to pane and preview detection with no install step.
 
 ## Usage
 
@@ -582,14 +582,12 @@ With hooks enabled, `coding-agents-tmux` can mark Claude panes as `idle`, `waiti
 
 `kiro` panes are detected from live tmux pane commands such as `kiro-cli`, `kiro-cli-chat`, `kiro-cli-term`, and `kiro`, plus common title patterns. They show up in `list`, `switch`, `popup`, and `status` alongside the other supported coding agents.
 
-Kiro runtime support is intentionally simple and does not require any Kiro agent configuration:
+Kiro runtime support has two layers:
 
-- if a tmux pane is running a Kiro CLI process, it is classified as `idle` unless preview text shows an obvious waiting prompt
-- pane preview heuristics can detect obvious question or approval prompts as waiting states
-- no Kiro hooks are installed or required; Kiro support is based on tmux process/title detection and preview fallback only
-- the session column uses a lightweight pane-derived label, usually the current directory basename
+- **Kiro CLI V3 hooks (higher fidelity).** `install-kiro` writes an owned hook file at `~/.kiro/hooks/coding-agents-tmux.json` (override the directory with `KIRO_HOME`). The hooks report `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd`, giving each pane a real session id/title and an accurate running/idle transition. Install it via `@coding-agents-tmux-auto-install` including `kiro`, the `@coding-agents-tmux-install-kiro-hooks` toggle, or by running `coding-agents-tmux install-kiro`. State lives under `kiro-state` (override with `CODING_AGENTS_TMUX_KIRO_STATE_DIR`).
+- **Pane-preview detection (always on).** The live tmux pane is the source of truth for the current turn. V3 panes are read from their TUI chrome: the input/status bar means idle, `Kiro is working …` (or `esc to cancel`) means running, and a tool-approval or menu overlay means waiting. No hook fires while an approval prompt is on screen, so that waiting state comes from the preview. Kiro V2 panes keep the earlier text heuristics. A detected pane with no stronger signal is assumed `idle`, and the session column uses a pane-derived label (usually the current directory basename).
 
-This means any `kiro-cli` pane can be discovered and switched to without naming or modifying a Kiro custom agent.
+Hooks are optional: a `kiro-cli` pane is still discovered and switchable without them, and without a named or modified Kiro custom agent.
 
 ## GitHub Copilot CLI
 
