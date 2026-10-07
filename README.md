@@ -208,19 +208,20 @@ Set any of them to `off` to disable that binding.
 so you do not have to open a chooser and scan the list yourself. Press it
 repeatedly to walk through every agent pane in priority order.
 
-Panes are ranked by attention tier, highest first:
+Each press moves to the first non-empty group below, in order, then to that
+group's head:
 
-| Tier | Pane state                                | Why                            |
-| ---- | ----------------------------------------- | ------------------------------ |
-| 1    | waiting for a question or free-form input | blocked on you right now       |
-| 2    | idle                                      | finished; may need review      |
-| 3    | new                                       | just started, nothing yet      |
-| 4    | running                                   | working; nothing for you to do |
-| 5    | unknown                                   | no reliable signal             |
+| Group | Panes                                             | Order within the group                                   |
+| ----- | ------------------------------------------------- | -------------------------------------------------------- |
+| 1     | waiting on a question or free-form input          | least recently looked at first (never-seen lead)         |
+| 2     | idle or new that you have **not** looked at yet   | idle before new, then longest in that state first (FIFO) |
+| 3     | everything else — seen idle/new, running, unknown | least recently looked at first (fair rotation)           |
 
-Within a tier, among panes you have not yet looked at, the pane that has been in
-its state **longest** comes first (true FIFO), so a session that has been waiting
-a while is never starved by newer arrivals.
+Group 1 always wins: as long as any pane is waiting on you, cycling stays among
+the waiting panes. A glance does **not** clear a waiting pane — only answering
+the prompt (which changes its state) removes it from the group. So with several
+pending prompts, repeated presses rotate through just those panes until each is
+resolved.
 
 ### Seen vs. unseen
 
@@ -230,20 +231,17 @@ state — so ordinary tmux navigation acknowledges panes too, not just cycling. 
 pane becomes **unseen** again when its state changes (for example, a running
 session goes idle, or an idle session starts waiting on a prompt).
 
+Seen/unseen only matters for idle and new panes: while unseen they lead the
+queue (group 2), and once looked at they drop into the general rotation
+(group 3) so busy panes stay reachable. Waiting panes ignore the seen flag
+entirely (group 1), and running/unknown panes are always in the rotation.
+
 Acknowledgements and status ages belong to a pane ID within one tmux server
 lifetime. Detaching and reattaching preserves them, as does restoring sessions
 while the same server and panes survive. A full server restart starts a fresh
 attention sweep: new or restored panes are unseen until focused or cycled to.
-Independent tmux servers never share this history.
-
-Unseen panes are offered before seen ones. Cycling first sweeps every pane you
-have not looked at — highest priority first, across tiers — so an unseen running
-pane comes before a seen idle one. Waiting panes lead this sweep while unseen;
-once visited, they give way to the remaining unseen panes even if their prompts
-are unanswered. When no other unseen pane remains, cycling rotates through all
-panes in least-recently-looked-at order, regardless of tier, so repeated presses
-visit every pane in turn instead of snapping back to the same one. Cycling never
-dead-ends: as long as there is more than one agent pane, `C-n` always moves.
+Independent tmux servers never share this history. Cycling never dead-ends: as
+long as there is more than one agent pane, `C-n` always moves.
 
 Unseen idle panes are also marked in the [status line](#status-line) and in the
 menu and popup choosers with a distinct filled circle (and a blue color where
@@ -255,22 +253,22 @@ have not yet reviewed.
 Three agents: **A** waiting on a prompt, **B** just finished (idle), **C** still
 running — none looked at yet.
 
-- Press `C-n` → jumps to **A** (waiting outranks everything).
-- Press `C-n` → jumps to **B** (idle outranks running).
-- Press `C-n` → jumps to **C** (running is last).
-- Press `C-n` → all three are now seen, so cycling switches to a
-  least-recently-looked-at rotation and jumps to **A** (you looked at it longest
-  ago). Further presses continue to **B**, then **C**, then back to **A**.
+- Press `C-n` → jumps to **A** (group 1 — waiting outranks everything).
+- With **A** the only waiting pane, each press leaves it for the next group and
+  the following press returns to it: `C-n` alternates **A → B → A → C** while
+  **A**'s prompt is unanswered. Looking at **A** does not clear it.
+- Answer **A**'s prompt. It leaves group 1. Now **B** (unseen idle, group 2)
+  comes first, then **C** joins the rotation.
+- Press `C-n` → **B**; press again → **C**. Once both are seen they share the
+  group-3 rotation, so repeated presses alternate between them, least recently
+  looked at first.
 
-Looking at **A** does not answer its prompt, but lets the unseen sweep continue
-to **B** and **C**. Once every pane is seen, priority no longer applies: the
-rotation is purely least-recently-looked-at, so a still-waiting **A** no longer
-jumps the queue — it simply comes up again when it is the stalest pane. Answering
-its prompt (or any state change) makes the pane unseen again, restoring its
-priority on the next sweep.
+With two waiting panes **A** and **D**, cycling bounces **A → D → A → D** until
+one is answered — the idle and running panes are never reached until group 1 is
+empty. The full menu (`prefix` + the menu key) still reaches every pane directly.
 
-If **C** later goes idle, it becomes unseen again — so the next `C-n` jumps
-straight to it ahead of every seen pane, not just those in its own tier.
+If **C** later goes idle, it becomes an unseen group-2 pane — so the next `C-n`
+jumps to it ahead of every pane in the rotation.
 
 The cycle key is configurable like the other bindings, and can be disabled with
 `off`:

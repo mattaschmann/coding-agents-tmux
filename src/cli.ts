@@ -532,7 +532,7 @@ async function runCycleCommand(options: SwitchOptions): Promise<void> {
 
   const ledger = readCycleLedger(panes[0]?.pane.serverIdentity);
   const ranked = rankPanesForCycle(panes, ledger);
-  const next = pickNextCyclePane(ranked, currentTarget, ledger);
+  const next = pickNextCyclePane(ranked, currentTarget);
 
   const client = options.client ? await resolveTmuxClient(options.client) : undefined;
 
