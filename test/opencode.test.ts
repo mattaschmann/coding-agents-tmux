@@ -274,7 +274,7 @@ test("plugin provider does not reuse rejected V2 pane state as a descendant matc
     {
       opencodeGeneration: "v2",
       target: "work:1.0",
-      paneId: "%1",
+      paneId: "%99",
       directory: "/tmp/project/subdirectory",
       title: "Previous pane occupant",
       sessionId: "previous-root",
@@ -290,6 +290,39 @@ test("plugin provider does not reuse rejected V2 pane state as a descendant matc
 
     assert.equal(summary?.runtime.status, "unknown");
     assert.equal(summary?.runtime.match.provider, "none");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("plugin provider keeps a fresh pane-bound V2 session after a directory switch", async () => {
+  // OpenCode `session_move` updates the record's directory immediately, but tmux
+  // still reports the pane's original process cwd. The stable pane id confirms
+  // identity, so the session must stay mapped despite the directory mismatch.
+  const pluginStateDir = createPluginStateDir([
+    {
+      opencodeGeneration: "v2",
+      target: "work:1.0",
+      paneId: "%1",
+      directory: "/tmp/moved-destination",
+      title: "Moved session",
+      sessionId: "moved-root",
+      status: "running",
+      activity: "busy",
+      updatedAt: Date.now(),
+    },
+  ]);
+  const restoreEnv = setEnv({ CODING_AGENTS_TMUX_STATE_DIR: pluginStateDir });
+
+  try {
+    const [summary] = await attachRuntimeToPanes(
+      [createDiscoveredPane({ currentPath: "/tmp/project" })],
+      { provider: "plugin" },
+    );
+
+    assert.equal(summary?.runtime.status, "running");
+    assert.equal(summary?.runtime.source, "plugin-exact");
+    assert.equal(summary?.runtime.session?.title, "Moved session");
   } finally {
     restoreEnv();
   }

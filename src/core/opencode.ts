@@ -455,7 +455,20 @@ function isFreshV2PluginState(state: PluginStateFile): boolean {
   return updatedAt > 0 && Date.now() - updatedAt <= PANE_BOUND_PLUGIN_STATE_MAX_AGE_MS;
 }
 
-function isCurrentPaneBoundPluginState(state: PluginStateFile, pane: TmuxPane): boolean {
+// A V2 record whose own paneId equals the pane's is bound by stable tmux pane
+// identity, so it is current regardless of directory: an OpenCode `session_move`
+// updates the record's directory immediately while tmux still reports the pane's
+// original process cwd, and requiring them to match would drop a live session to
+// "unknown" until the shell's cwd caught up. Records matched only by target or
+// directory have no confirmed pane identity, so they still require a directory
+// match to avoid adopting a previous pane occupant's stale session.
+function isCurrentPaneIdentityState(state: PluginStateFile, pane: TmuxPane): boolean {
+  return (
+    state.paneId === pane.paneId && state.opencodeGeneration === "v2" && isFreshV2PluginState(state)
+  );
+}
+
+function isCurrentDirectoryBoundPluginState(state: PluginStateFile, pane: TmuxPane): boolean {
   return (
     state.directory === pane.currentPath &&
     state.opencodeGeneration === "v2" &&
@@ -464,17 +477,18 @@ function isCurrentPaneBoundPluginState(state: PluginStateFile, pane: TmuxPane): 
 }
 
 function isUsableExactPluginState(state: PluginStateFile, pane: TmuxPane): boolean {
-  return state.opencodeGeneration !== "v2" || isCurrentPaneBoundPluginState(state, pane);
+  if (state.opencodeGeneration !== "v2") return true;
+  return isCurrentPaneIdentityState(state, pane) || isCurrentDirectoryBoundPluginState(state, pane);
 }
 
 function getPaneBoundPluginState(index: PluginStateIndex, pane: TmuxPane): PluginStateFile | null {
   const paneIdState = index.exactPaneIdMatches.get(pane.paneId);
-  if (paneIdState && isCurrentPaneBoundPluginState(paneIdState, pane)) return paneIdState;
+  if (paneIdState && isCurrentPaneIdentityState(paneIdState, pane)) return paneIdState;
 
   const targetState = index.exactTargetMatches.get(pane.target);
-  return targetState &&
-    (!targetState.paneId || targetState.paneId === pane.paneId) &&
-    isCurrentPaneBoundPluginState(targetState, pane)
+  if (!targetState || (targetState.paneId && targetState.paneId !== pane.paneId)) return null;
+  return isCurrentPaneIdentityState(targetState, pane) ||
+    isCurrentDirectoryBoundPluginState(targetState, pane)
     ? targetState
     : null;
 }
