@@ -320,9 +320,14 @@ function createTmuxRefreshScheduler(): { schedule: () => void; cleanup: Cleanup 
   };
 }
 
+// Real OpenCode session IDs start with this prefix; a `--continue` cold start
+// briefly reports a placeholder route ("dummy") that must not be synced.
+const SESSION_ID_PREFIX = "ses";
+
 function selectedSession(context: PanePluginContext): string | null {
   const route = context.ui.router.current();
-  return route.type === "session" ? route.sessionID : null;
+  if (route.type !== "session") return null;
+  return route.sessionID.startsWith(SESSION_ID_PREFIX) ? route.sessionID : null;
 }
 
 function eventSessionID(event: { readonly data: Record<string, unknown> }): string | null {
@@ -448,17 +453,17 @@ export async function setupPanePlugin(
     lastSelectedSessionId = sessionID;
   };
 
+  const scheduleRetry = () => {
+    if (disposed || retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      queueRefresh("cache.reconcile");
+    }, options.refreshRetryMs ?? 250);
+    retryTimer.unref();
+  };
+
   const queueRefresh = (sourceEventType: string, onSettled?: () => void) => {
-    void refresh(sourceEventType)
-      .catch(() => {
-        if (disposed || retryTimer) return;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          queueRefresh("cache.reconcile");
-        }, options.refreshRetryMs ?? 250);
-        retryTimer.unref();
-      })
-      .finally(onSettled);
+    void refresh(sourceEventType).catch(scheduleRetry).finally(onSettled);
   };
 
   for (const type of EVENT_TYPES) {
@@ -484,12 +489,8 @@ export async function setupPanePlugin(
     );
   }
 
-  try {
-    await refresh("plugin.init");
-  } catch (error) {
-    cleanup();
-    throw error;
-  }
+  // Retry rather than tear down: a cold `--continue` start can race the server.
+  await refresh("plugin.init").catch(scheduleRetry);
 
   navigationTimer = setInterval(() => {
     const current = selectedSession(context);
