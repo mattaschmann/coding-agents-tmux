@@ -265,6 +265,20 @@ function buildSelfCommand(args: string[]): string {
   return [CLI_PATH, ...args].map(shellEscape).join(" ");
 }
 
+// Persisted hooks must be identical across machines, so a CLI under $HOME is written as "$HOME"/...
+export function buildHookCommand(
+  args: string[],
+  cliPath: string = CLI_PATH,
+  home: string = homedir(),
+): string {
+  if (!cliPath.startsWith(`${home}/`)) {
+    return [cliPath, ...args].map(shellEscape).join(" ");
+  }
+
+  const rest = [cliPath.slice(home.length), ...args].map(shellEscape);
+  return `"$HOME"${rest.join(" ")}`;
+}
+
 async function runTmuxCommand(args: string[]): Promise<void> {
   const { stderrText, exitCode } = await runCommand(["tmux", ...args]);
 
@@ -692,7 +706,7 @@ async function runHookStateCommand(
 }
 
 async function runCodexHooksTemplateCommand(): Promise<void> {
-  console.log(buildCodexHooksTemplate(buildSelfCommand(["codex-hook-state"])));
+  console.log(buildCodexHooksTemplate(buildHookCommand(["codex-hook-state"])));
 }
 
 async function runCodexHookStateCommand(): Promise<void> {
@@ -700,7 +714,7 @@ async function runCodexHookStateCommand(): Promise<void> {
 }
 
 async function runInstallCodexCommand(_options: InstallCodexOptions): Promise<void> {
-  const result = installCodexIntegration(buildSelfCommand(["codex-hook-state"]));
+  const result = installCodexIntegration(buildHookCommand(["codex-hook-state"]));
 
   console.log(`Updated ${result.configPath}`);
   console.log(`Updated ${result.hooksPath}`);
@@ -708,7 +722,7 @@ async function runInstallCodexCommand(_options: InstallCodexOptions): Promise<vo
 }
 
 async function runClaudeHooksTemplateCommand(): Promise<void> {
-  console.log(buildClaudeHooksTemplate(buildSelfCommand(["claude-hook-state"])));
+  console.log(buildClaudeHooksTemplate(buildHookCommand(["claude-hook-state"])));
 }
 
 async function runClaudeHookStateCommand(): Promise<void> {
@@ -716,14 +730,14 @@ async function runClaudeHookStateCommand(): Promise<void> {
 }
 
 async function runInstallClaudeCommand(_options: InstallClaudeOptions): Promise<void> {
-  const result = installClaudeIntegration(buildSelfCommand(["claude-hook-state"]));
+  const result = installClaudeIntegration(buildHookCommand(["claude-hook-state"]));
 
   console.log(`Updated ${result.settingsPath}`);
   console.log("Restart Claude Code sessions so new hooks are loaded");
 }
 
 async function runKiroHooksTemplateCommand(): Promise<void> {
-  console.log(buildKiroHooksTemplate(buildSelfCommand(["kiro-hook-state"])));
+  console.log(buildKiroHooksTemplate(buildHookCommand(["kiro-hook-state"])));
 }
 
 async function runKiroHookStateCommand(): Promise<void> {
@@ -731,7 +745,7 @@ async function runKiroHookStateCommand(): Promise<void> {
 }
 
 async function runInstallKiroCommand(): Promise<void> {
-  const result = installKiroIntegration(buildSelfCommand(["kiro-hook-state"]));
+  const result = installKiroIntegration(buildHookCommand(["kiro-hook-state"]));
 
   console.log(`Updated ${result.hooksPath}`);
   console.log("Restart Kiro CLI sessions so new hooks are loaded");

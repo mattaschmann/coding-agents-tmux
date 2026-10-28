@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  buildHookCommand,
   buildStatusOutput,
   buildStatusRefreshHookCommand,
   buildTmuxSnippet,
@@ -1357,4 +1358,18 @@ exit 1
   } finally {
     restoreEnv();
   }
+});
+
+test("buildHookCommand writes a $HOME-relative path when the CLI is under home", () => {
+  assert.equal(
+    buildHookCommand(["claude-hook-state"], "/home/me/workspace/cat/bin/cat", "/home/me"),
+    `"$HOME"'/workspace/cat/bin/cat' 'claude-hook-state'`,
+  );
+});
+
+test("buildHookCommand keeps an absolute path outside home", () => {
+  assert.equal(
+    buildHookCommand(["claude-hook-state"], "/opt/cat/bin/cat", "/home/me"),
+    `'/opt/cat/bin/cat' 'claude-hook-state'`,
+  );
 });
